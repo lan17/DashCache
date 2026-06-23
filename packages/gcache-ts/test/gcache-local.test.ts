@@ -19,12 +19,11 @@ describe("GCache local-only MVP", () => {
     // Given a cached function with a valid default local configuration.
     const gcache = new GCache();
     let calls = 0;
-    const getUser = gcache.cached({
+    const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "GetUserDefaultDisabled",
-      id: ([userId]: [string]) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
-    })(async (userId: string) => ({ userId, calls: ++calls }));
+    });
 
     // When the function is called outside an enabled context.
     const first = await getUser("123");
@@ -40,12 +39,11 @@ describe("GCache local-only MVP", () => {
     // Given metrics may be explicitly disabled and Redis may be absent.
     const gcache = new GCache({ metrics: false });
     let calls = 0;
-    const getUser = gcache.cached({
+    const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "MetricsDisabledNoRedis",
-      id: ([userId]: [string]) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
-    })(async (userId: string) => ({ userId, calls: ++calls }));
+    });
 
     // When local caching is used and targeted invalidation is requested without a Redis layer.
     const first = await gcache.enable(async () => await getUser("123"));
@@ -61,12 +59,11 @@ describe("GCache local-only MVP", () => {
     // Given a cached function called with the same cache key.
     const gcache = new GCache();
     let calls = 0;
-    const getUser = gcache.cached({
+    const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "GetUserEnabled",
-      id: ([userId]: [string]) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
-    })(async (userId: string) => ({ userId, calls: ++calls }));
+    });
 
     // When the function is called twice inside gcache.enable().
     const [first, second] = await gcache.enable(async () => [await getUser("123"), await getUser("123")]);
@@ -81,12 +78,11 @@ describe("GCache local-only MVP", () => {
     // Given caching is enabled in an outer scope.
     const gcache = new GCache();
     let calls = 0;
-    const getUser = gcache.cached({
+    const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "GetUserNestedDisable",
-      id: ([userId]: [string]) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
-    })(async (userId: string) => ({ userId, calls: ++calls }));
+    });
 
     // When a nested disabled scope calls the cached function.
     const result = await gcache.enable(async () => {
@@ -107,12 +103,11 @@ describe("GCache local-only MVP", () => {
     // Given one flow enables caching while another flow does not.
     const gcache = new GCache();
     let calls = 0;
-    const getValue = gcache.cached({
+    const getValue = gcache.cached(async (tenantId: string) => ({ tenantId, calls: ++calls }), {
       keyType: "tenant_id",
       useCase: "ParallelContextIsolation",
-      id: ([tenantId]: [string]) => tenantId,
       defaultConfig: GCacheKeyConfig.enabled(60),
-    })(async (tenantId: string) => ({ tenantId, calls: ++calls }));
+    });
 
     // When both flows run concurrently.
     const [enabledFlow, disabledFlow] = await Promise.all([
@@ -133,12 +128,11 @@ describe("GCache local-only MVP", () => {
     // Given an enabled context with concurrent cache lookups for the same key.
     const gcache = new GCache();
     let calls = 0;
-    const getUser = gcache.cached({
+    const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "PromiseAllContext",
-      id: ([userId]: [string]) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
-    })(async (userId: string) => ({ userId, calls: ++calls }));
+    });
 
     // When one call populates cache before Promise.all repeats the same lookup.
     const first = await gcache.enable(async () => await getUser("123"));
@@ -157,13 +151,12 @@ describe("GCache local-only MVP", () => {
     // Given two calls would collide if key components were concatenated without escaping.
     const gcache = new GCache();
     let calls = 0;
-    const search = gcache.cached({
+    const search = gcache.cached(async (userId: string, filter?: string) => ({ userId, filter, calls: ++calls }), {
       keyType: "user_id",
       useCase: "DelimiterSafeLocalKeys",
-      id: ([userId]: [string, string | undefined]) => userId,
-      args: ([, filter]: [string, string | undefined]) => ({ filter }),
+      key: (userId, filter) => ({ id: userId, args: { filter } }),
       defaultConfig: GCacheKeyConfig.enabled(60),
-    })(async (userId: string, filter?: string) => ({ userId, filter, calls: ++calls }));
+    });
 
     // When an id containing a query delimiter is followed by a structurally different key.
     const [first, second, firstAgain, secondAgain] = await gcache.enable(async () => [
@@ -185,13 +178,12 @@ describe("GCache local-only MVP", () => {
     // Given a cached function with explicit key args in non-sorted declaration order.
     const gcache = new GCache();
     let calls = 0;
-    const search = gcache.cached({
+    const search = gcache.cached(async (userId: string, page: number, filter: string) => ({ userId, page, filter, calls: ++calls }), {
       keyType: "user_id",
       useCase: "SearchPosts",
-      id: ([userId]: [string, number, string]) => userId,
-      args: ([, page, filter]) => ({ page, filter }),
+      key: (userId, page, filter) => ({ id: userId, args: { page, filter } }),
       defaultConfig: GCacheKeyConfig.enabled(60),
-    })(async (userId: string, page: number, filter: string) => ({ userId, page, filter, calls: ++calls }));
+    });
 
     // When calls vary by explicit args.
     const results = await gcache.enable(async () => [
@@ -216,15 +208,14 @@ describe("GCache local-only MVP", () => {
     vi.useFakeTimers();
     const gcache = new GCache();
     let calls = 0;
-    const getUser = gcache.cached({
+    const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "LocalTtlExpiration",
-      id: ([userId]: [string]) => userId,
       defaultConfig: new GCacheKeyConfig({
         ttlSec: { [CacheLayer.LOCAL]: 1 },
         ramp: { [CacheLayer.LOCAL]: 100 },
       }),
-    })(async (userId: string) => ({ userId, calls: ++calls }));
+    });
 
     // When the same key is called before and after TTL expiration.
     const first = await gcache.enable(async () => await getUser("123"));
@@ -245,14 +236,18 @@ describe("GCache local-only MVP", () => {
     const logger = { debug: vi.fn(), warn: vi.fn(), error: vi.fn() };
     const gcache = new GCache({ logger });
     let calls = 0;
-    const getUser = gcache.cached({
+    const getUser = gcache.cached(async () => ({ calls: ++calls }), {
       keyType: "user_id",
       useCase: "KeyConstructionFailure",
-      id: () => {
-        throw new Error("bad id");
-      },
+      key: () => ({
+        id: {
+          toString() {
+            throw new Error("bad id");
+          },
+        } as unknown as string,
+      }),
       defaultConfig: GCacheKeyConfig.enabled(60),
-    })(async () => ({ calls: ++calls }));
+    });
 
     // When the cached function is called in an enabled scope.
     const first = await gcache.enable(async () => await getUser());
@@ -268,12 +263,11 @@ describe("GCache local-only MVP", () => {
     // Given nested cache scopes can throw application errors.
     const gcache = new GCache();
     let calls = 0;
-    const getUser = gcache.cached({
+    const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "ScopeFailureRestore",
-      id: ([userId]: [string]) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
-    })(async (userId: string) => ({ userId, calls: ++calls }));
+    });
 
     // When an enabled scope and an inner disabled scope fail.
     await expect(
@@ -309,12 +303,11 @@ describe("GCache local-only MVP", () => {
     }).localCache;
     vi.spyOn(localCache, "put").mockRejectedValueOnce(new Error("local write failed"));
     let calls = 0;
-    const getUser = gcache.cached({
+    const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "LocalWriteFailOpen",
-      id: ([userId]: [string]) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
-    })(async (userId: string) => ({ userId, calls: ++calls }));
+    });
 
     // When the first local write fails and later calls retry normal cache behavior.
     const first = await gcache.enable(async () => await getUser("123"));
@@ -333,11 +326,10 @@ describe("GCache local-only MVP", () => {
     const logger = { debug: vi.fn(), warn: vi.fn(), error: vi.fn() };
     const gcache = new GCache({ logger });
     let calls = 0;
-    const getUser = gcache.cached({
+    const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "MissingConfigFailure",
-      id: ([userId]: [string]) => userId,
-    })(async (userId: string) => ({ userId, calls: ++calls }));
+    });
 
     // When the cached function is called in an enabled scope.
     const first = await gcache.enable(async () => await getUser("123"));
@@ -354,12 +346,11 @@ describe("GCache local-only MVP", () => {
     // Given two cached values in the local cache.
     const gcache = new GCache();
     let calls = 0;
-    const getUser = gcache.cached({
+    const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "DeleteAndFlush",
-      id: ([userId]: [string]) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
-    })(async (userId: string) => ({ userId, calls: ++calls }));
+    });
     await gcache.enable(async () => {
       await getUser("123");
       await getUser("456");
@@ -386,28 +377,25 @@ describe("GCache local-only MVP", () => {
   it("rejects duplicate and reserved use cases", () => {
     // Given a GCache instance with one registered use case.
     const gcache = new GCache();
-    gcache.cached({
+    gcache.cached(async (userId: string) => userId, {
       keyType: "user_id",
       useCase: "UniqueUseCase",
-      id: ([userId]: [string]) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
-    })(async (userId: string) => userId);
+    });
 
     // When another function registers the same use case or the reserved watermark use case.
     const duplicate = () =>
-      gcache.cached({
+      gcache.cached(async (userId: string) => userId, {
         keyType: "user_id",
         useCase: "UniqueUseCase",
-        id: ([userId]: [string]) => userId,
         defaultConfig: GCacheKeyConfig.enabled(60),
-      })(async (userId: string) => userId);
+      });
     const reserved = () =>
-      gcache.cached({
+      gcache.cached(async (userId: string) => userId, {
         keyType: "user_id",
         useCase: "watermark",
-        id: ([userId]: [string]) => userId,
         defaultConfig: GCacheKeyConfig.enabled(60),
-      })(async (userId: string) => userId);
+      });
 
     // Then GCache rejects both registrations.
     expect(duplicate).toThrow(UseCaseIsAlreadyRegisteredError);
@@ -418,12 +406,11 @@ describe("GCache local-only MVP", () => {
     // Given a cached function and the readability aliases.
     const gcache = new GCache();
     let calls = 0;
-    const getUser = gcache.cached({
+    const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "AliasScopes",
-      id: ([userId]: [string]) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
-    })(async (userId: string) => ({ userId, calls: ++calls }));
+    });
 
     // When withEnabled and withDisabled are nested.
     const result = await gcache.withEnabled(async () => {
@@ -446,15 +433,14 @@ describe("GCache local-only MVP", () => {
     const logger = { debug: vi.fn(), warn: vi.fn(), error: vi.fn() };
     const gcache = new GCache({ logger });
     let calls = 0;
-    const getUser = gcache.cached({
+    const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "InvalidLocalTtl",
-      id: ([userId]: [string]) => userId,
       defaultConfig: new GCacheKeyConfig({
         ttlSec: { [CacheLayer.LOCAL]: 0 },
         ramp: { [CacheLayer.LOCAL]: 100 },
       }),
-    })(async (userId: string) => ({ userId, calls: ++calls }));
+    });
 
     // When the function is called in an enabled scope.
     const first = await gcache.enable(async () => await getUser("123"));
@@ -471,12 +457,11 @@ describe("GCache local-only MVP", () => {
     // Given a local cache with room for one entry.
     const gcache = new GCache({ localMaxSize: 1 });
     let calls = 0;
-    const getUser = gcache.cached({
+    const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "LocalMaxSizeEviction",
-      id: ([userId]: [string]) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
-    })(async (userId: string) => ({ userId, calls: ++calls }));
+    });
 
     // When two different keys are cached.
     await gcache.enable(async () => {

@@ -21,7 +21,7 @@ export {
   UseCaseNameIsReservedError,
 } from "./errors.js";
 export { GCache } from "./gcache.js";
-export type { CachedOptions } from "./gcache.js";
+export type { CacheKeySpec, CachedFn, CachedOptions, CachedValue } from "./gcache.js";
 export { GCacheKey, invalidationPrefix, normalizeArgs, redisClusterHashTag } from "./key.js";
 export type { GCacheKeyInit } from "./key.js";
 export type {

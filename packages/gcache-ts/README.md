@@ -18,22 +18,16 @@ import { GCache, GCacheKeyConfig } from "@rungalileo/gcache";
 
 const gcache = new GCache();
 
-const getUser = gcache.cached({
-  keyType: "user_id",
-  useCase: "GetUser",
-  id: ([userId]: [string]) => userId,
-  defaultConfig: GCacheKeyConfig.enabled(60),
-})(async (userId: string) => {
-  return db.fetchUser(userId);
-});
+const getUser = gcache.cached(
+  (userId: string) => db.fetchUser(userId),
+  { keyType: "user_id", useCase: "GetUser", defaultConfig: GCacheKeyConfig.enabled(60) },
+);
 
-// Caching is disabled by default.
+// Caching is OFF outside an enable() scope (see "Enabled context"), so this runs the fn uncached:
 await getUser("123");
 
-// Enable caching for one async scope.
-const user = await gcache.enable(async () => {
-  return await getUser("123");
-});
+// Inside enable(), reads are cached. Enable once at your request boundary (not per call site):
+const user = await gcache.enable(() => getUser("123"));
 ```
 
 ## Redis-backed TTL cache
@@ -89,27 +83,29 @@ type RedisValueEnvelope = {
 
 ## Targeted invalidation and watermarks
 
-Mutable Redis-backed use cases can opt into targeted invalidation by setting `trackForInvalidation: true` on the cached function and calling `invalidate(keyType, id)` after writes:
+Mutable Redis-backed use cases can opt into targeted invalidation by setting `trackForInvalidation: true` in the options and calling `invalidate` after writes — either `gcache.invalidate(keyType, id)` or the handle shortcut `getUser.invalidate(id)`:
 
 ```ts
 import { CacheLayer, GCache, GCacheKeyConfig } from "@rungalileo/gcache";
 
 const gcache = new GCache({ redis: { client: redisClient } });
 
-const getUser = gcache.cached({
-  keyType: "user_id",
-  useCase: "GetMutableUser",
-  id: ([userId]: [string]) => userId,
-  trackForInvalidation: true,
-  // Strongly invalidated mutable data should usually disable local cache.
-  defaultConfig: new GCacheKeyConfig({
-    ttlSec: { [CacheLayer.REMOTE]: 300 },
-    ramp: { [CacheLayer.REMOTE]: 100 },
-  }),
-})(async (userId: string) => db.fetchUser(userId));
+const getUser = gcache.cached(
+  (userId: string) => db.fetchUser(userId),
+  {
+    keyType: "user_id",
+    useCase: "GetMutableUser",
+    trackForInvalidation: true,
+    // Strongly invalidated mutable data should usually disable local cache.
+    defaultConfig: new GCacheKeyConfig({
+      ttlSec: { [CacheLayer.REMOTE]: 300 },
+      ramp: { [CacheLayer.REMOTE]: 100 },
+    }),
+  },
+);
 
 await updateUser("123", patch);
-await gcache.invalidate("user_id", "123");
+await getUser.invalidate("123"); // handle shortcut for gcache.invalidate("user_id", "123")
 ```
 
 Invalidation writes a Redis watermark at `{encodedUrnPrefix:encodedKeyType:encodedId}#watermark`. Tracked Redis cache entries use the same Redis Cluster hash tag, for example `{urn:user_id:123}?locale=en#GetMutableUser`, so the value key and watermark key live in the same slot. Key components are percent-encoded before joining so delimiters inside IDs or args cannot collide with delimiters in the key format. Components may not contain `{` or `}` because those characters would corrupt the hash tag.
@@ -122,7 +118,7 @@ Local cache limitation: targeted invalidation is enforced by Redis watermarks. E
 
 ## Runtime config and ramp controls
 
-Every cached function can provide a decorator-local `defaultConfig`; a `cacheConfigProvider` can override it at runtime. If the provider returns `null`, GCache falls back to the cached function's `defaultConfig`. If neither exists, or a layer's TTL/ramp is missing or disabled, only that layer is skipped.
+Every cached function can provide a per-use-case `defaultConfig`; a `cacheConfigProvider` can override it at runtime. If the provider returns `null`, GCache falls back to the cached function's `defaultConfig`. If neither exists, or a layer's TTL/ramp is missing or disabled, only that layer is skipped.
 
 ```ts
 import { CacheLayer, GCache, GCacheKeyConfig } from "@rungalileo/gcache";
@@ -168,39 +164,47 @@ const getUser = gcache.cached({
 
 ## Enabled context
 
-The TypeScript port uses Node `AsyncLocalStorage` to mirror Python's `with gcache.enable():` safety model.
+Caching is **off by default** and only active inside a `gcache.enable(...)` scope. This is deliberate: it lets you turn caching **off in write paths** so a stale read can't be cached around a write. The TypeScript port uses Node `AsyncLocalStorage` to mirror Python's `with gcache.enable():` model.
+
+**Enable once at your request boundary** (e.g. a middleware that wraps read-request handling) so individual call sites don't each need it; wrap mutation handlers in `disable()`:
 
 ```ts
 await gcache.enable(async () => {
   await getUser("123"); // cached
 
   await gcache.disable(async () => {
-    await updateUser("123", patch); // uncached reads here
+    await updateUser("123", patch); // reads here are uncached
   });
 
   await getUser("123"); // cached again
 });
 ```
 
-- Default is disabled.
+- Default is disabled — a cached function called **outside** any `enable()` scope simply runs uncached (no error), so wrap your read paths to actually cache.
 - Enabled state is async-scope-local, not process-global.
 - Nested `enable` / `disable` scopes restore the previous behavior when the callback completes.
 
-## Explicit key builders
+## Keys, ids, and extra dimensions
 
-TypeScript does not have safe Python-style function argument introspection after transpilation/bundling. Use explicit key builders instead:
+`cached(fn, options)` wraps a function; the wrapped callable has the same signature. The cache key comes from an optional `key` selector whose parameters are inferred from `fn`. Omit `key` and the **first argument is the id**. Provide `key` to extract a field or add secondary dimensions:
 
 ```ts
-const searchPosts = gcache.cached({
-  keyType: "user_id",
-  useCase: "SearchPosts",
-  id: ([userId]: [string, number, string]) => userId,
-  args: ([, page, filter]) => ({ page, filter }),
-  defaultConfig: GCacheKeyConfig.enabled(60),
-})(async (userId: string, page: number, filter: string) => {
-  return db.searchPosts(userId, page, filter);
-});
+const searchPosts = gcache.cached(
+  (userId: string, page: number, filter: string) => db.searchPosts(userId, page, filter),
+  {
+    keyType: "user_id",
+    useCase: "SearchPosts",
+    key: (userId, page, filter) => ({ id: userId, args: { page, filter } }),
+    defaultConfig: GCacheKeyConfig.enabled(60),
+  },
+);
+await gcache.enable(() => searchPosts("u1", 2, "active"));
 ```
+
+- **`keyType` + `id` is the invalidation unit.** `gcache.invalidate("user_id", "123")` (or `searchPosts.invalidate("123")`) busts **every** entry for that user, across all `args` variants. `useCase` identifies the individual cache (it's the metrics label and part of the stored key); caches sharing a `keyType` are invalidated together.
+- **`args` are part of the cache key** — different `args` produce different entries — but invalidation is by `id` only.
+- **Non-key inputs** (a db handle, an `AbortSignal`) are simply parameters the `key` selector ignores; they still reach `fn`.
+- **Methods:** pass `obj.method.bind(obj)` (or `(...a) => obj.method(...a)`) — a bare `obj.method` reference loses `this`.
 
 ## Metrics
 

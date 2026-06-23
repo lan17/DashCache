@@ -1,6 +1,6 @@
 import { performance } from "node:perf_hooks";
 
-import { CacheLayer, GCacheConfig, GCacheKeyConfig, randomRampSampler, type CacheConfigProvider, type CacheRampSampler, type InvalidateOptions, type Logger } from "./config.js";
+import { CacheLayer, GCacheConfig, GCacheKeyConfig, randomRampSampler, type CacheConfigProvider, type CacheRampSampler, type Logger } from "./config.js";
 import { GCacheContext } from "./context.js";
 import { UseCaseIsAlreadyRegisteredError, UseCaseNameIsReservedError } from "./errors.js";
 import { GCacheKey, normalizeArgs } from "./key.js";
@@ -11,20 +11,33 @@ import { RedisCache } from "./internal/redis-cache.js";
 import { fetchKeyConfig } from "./internal/runtime-config.js";
 
 type Awaitable<T> = T | Promise<T>;
-type CacheableArgs = readonly unknown[];
 type CacheArgs = Record<string, string | number | boolean | bigint | null | undefined>;
+type Id = string | number | bigint;
 
-export interface CachedOptions<Args extends CacheableArgs> {
+/** A cache-key spec: a bare id, or an id plus extra (secondary) key dimensions. */
+export type CacheKeySpec = Id | { readonly id: Id; readonly args?: CacheArgs };
+
+// "Any function" without using `any`, so Parameters/ReturnType still apply.
+type AnyFn = (...args: never[]) => unknown;
+/** The cached value type, derived from the wrapped function's return. */
+export type CachedValue<Fn extends AnyFn> = Awaited<ReturnType<Fn>>;
+type KeySelector<Fn extends AnyFn> = (...args: Parameters<Fn>) => CacheKeySpec;
+
+export interface CachedOptions<Fn extends AnyFn> {
   readonly keyType: string;
   readonly useCase: string;
-  readonly id: (args: Args) => string | number | bigint;
-  readonly args?: (args: Args) => CacheArgs;
   readonly defaultConfig?: import("./config.js").GCacheKeyConfig | null;
-  readonly serializer?: Serializer<unknown> | null;
+  readonly serializer?: Serializer<CachedValue<Fn>> | null;
   readonly trackForInvalidation?: boolean;
   // Coalesce concurrent misses for this use case into one in-flight fallback.
   // Defaults to the instance's coalesceByDefault (true); runtime config wins.
   readonly coalesce?: boolean;
+  readonly key: KeySelector<Fn>;
+}
+
+export interface CachedFn<Fn extends AnyFn> {
+  (...args: Parameters<Fn>): Promise<CachedValue<Fn>>;
+  delete(id: Id, args?: CacheArgs): Promise<boolean>;
 }
 
 const DEFAULT_LOCAL_MAX_SIZE = 10_000;
@@ -91,65 +104,69 @@ export class GCache {
     return this.context.isEnabled();
   }
 
-  cached<Args extends CacheableArgs>(
-    options: CachedOptions<Args>,
-  ): <Value>(fn: (...args: Args) => Awaitable<Value>) => (...args: Args) => Promise<Value> {
+  cached<Fn extends AnyFn>(fn: Fn, options: CachedOptions<Fn>): CachedFn<Fn> {
     this.registerUseCase(options.useCase);
 
-    return <Value>(fn: (...args: Args) => Awaitable<Value>) => {
-      return async (...args: Args): Promise<Value> => {
-        if (!this.isEnabled()) {
-          this.metrics?.disabled({
-            useCase: options.useCase,
-            keyType: options.keyType,
-            layer: "noop",
-            reason: "context",
-          });
-          return await fn(...args);
-        }
+    const run = async (...args: Parameters<Fn>): Promise<CachedValue<Fn>> => {
+      // `fn`'s awaited result is the cached value by construction; the generic `Fn` erases it to `unknown`.
+      const fallback = async (): Promise<CachedValue<Fn>> => (await fn(...args)) as CachedValue<Fn>;
 
-        let key: GCacheKey;
-        try {
-          key = this.createKey(options, args);
-        } catch (error) {
-          this.logger.error("Could not construct GCache key", error);
-          this.metrics?.error({
-            useCase: options.useCase,
-            keyType: options.keyType,
-            layer: "noop",
-            error: errorName(error),
-            inFallback: false,
-          });
-          return await this.callFallback({ useCase: options.useCase, keyType: options.keyType, layer: "noop" }, async () => await fn(...args));
-        }
+      if (!this.isEnabled()) {
+        this.metrics?.disabled({
+          useCase: options.useCase,
+          keyType: options.keyType,
+          layer: "noop",
+          reason: "context",
+        });
+        return await fallback();
+      }
 
-        let keyConfig: GCacheKeyConfig | null;
-        try {
-          keyConfig = await fetchKeyConfig(this.configProvider, key);
-        } catch (error) {
-          // Provider failure: fail open and run uncached, mirroring the per-layer config_error path.
-          this.logger.warn("Could not resolve GCache key config", error);
-          this.metrics?.disabled({
-            useCase: options.useCase,
-            keyType: options.keyType,
-            layer: "noop",
-            reason: "config_error",
-          });
-          return await this.callFallback({ useCase: options.useCase, keyType: options.keyType, layer: "noop" }, async () => await fn(...args));
-        }
+      let key: GCacheKey;
+      try {
+        key = this.buildKey(options, options.key(...args));
+      } catch (error) {
+        this.logger.error("Could not construct GCache key", error);
+        this.metrics?.error({
+          useCase: options.useCase,
+          keyType: options.keyType,
+          layer: "noop",
+          error: errorName(error),
+          inFallback: false,
+        });
+        return await this.callFallback({ useCase: options.useCase, keyType: options.keyType, layer: "noop" }, fallback);
+      }
 
-        const run = (): Promise<Value> =>
-          this.redisCache === null
-            ? this.getThroughLocalOnly(key, keyConfig, async () => await fn(...args))
-            : this.getThroughRedisChain(key, keyConfig, async () => await fn(...args));
+      let keyConfig: GCacheKeyConfig | null;
+      try {
+        keyConfig = await fetchKeyConfig(this.configProvider, key);
+      } catch (error) {
+        // Provider failure: fail open and run uncached, mirroring the per-layer config_error path.
+        this.logger.warn("Could not resolve GCache key config", error);
+        this.metrics?.disabled({
+          useCase: options.useCase,
+          keyType: options.keyType,
+          layer: "noop",
+          reason: "config_error",
+        });
+        return await this.callFallback({ useCase: options.useCase, keyType: options.keyType, layer: "noop" }, fallback);
+      }
 
-        if (keyConfig?.coalesce ?? options.coalesce ?? this.coalesceByDefault) {
-          return await this.singleFlight(key, run);
-        }
+      const runThroughCache = (): Promise<CachedValue<Fn>> =>
+        this.redisCache === null
+          ? this.getThroughLocalOnly(key, keyConfig, fallback)
+          : this.getThroughRedisChain(key, keyConfig, fallback);
 
-        return await run();
-      };
+      if (keyConfig?.coalesce ?? options.coalesce ?? this.coalesceByDefault) {
+        return await this.singleFlight(key, runThroughCache);
+      }
+
+      return await runThroughCache();
     };
+
+    return Object.assign(run, {
+      delete: async (id: Id, args?: CacheArgs): Promise<boolean> =>
+        await this.delete(this.buildKey(options, args === undefined ? id : { id, args })),
+    });
   }
 
   async delete(key: GCacheKey): Promise<boolean> {
@@ -169,14 +186,14 @@ export class GCache {
     }
   }
 
-  async invalidate(keyType: string, id: string | number | bigint, options: InvalidateOptions = {}): Promise<void> {
+  async invalidate(keyType: string, id: Id, futureBufferMs = 0): Promise<void> {
     if (this.redisCache === null) {
       return;
     }
 
     this.metrics?.invalidation({ keyType, layer: CacheLayer.REMOTE });
     try {
-      await this.redisCache.invalidate(keyType, String(id), options.futureBufferMs ?? 0, this.urnPrefix);
+      await this.redisCache.invalidate(keyType, String(id), futureBufferMs, this.urnPrefix);
     } catch (error) {
       this.logger.warn("Error writing GCache invalidation watermark", error);
       this.metrics?.error({
@@ -342,12 +359,13 @@ export class GCache {
     this.useCases.add(useCase);
   }
 
-  private createKey<Args extends CacheableArgs>(options: CachedOptions<Args>, args: Args): GCacheKey {
+  private buildKey<Fn extends AnyFn>(options: CachedOptions<Fn>, cacheKey: CacheKeySpec): GCacheKey {
+    const spec = typeof cacheKey === "object" ? cacheKey : { id: cacheKey };
     return new GCacheKey({
       keyType: options.keyType,
-      id: String(options.id(args)),
+      id: String(spec.id),
       useCase: options.useCase,
-      args: normalizeArgs(options.args?.(args) ?? {}),
+      args: normalizeArgs(spec.args ?? {}),
       urnPrefix: this.urnPrefix,
       defaultConfig: options.defaultConfig ?? null,
       serializer: (options.serializer as Serializer<unknown> | null | undefined) ?? null,
