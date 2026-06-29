@@ -66,16 +66,19 @@ describe("GCache single-flight coalescing", () => {
     let calls = 0;
     const gate = deferred<void>();
     const gcache = new GCache();
-    const getUser = gcache.cached({
-      keyType: "user_id",
-      useCase: "Coalesce_ConcurrentMisses",
-      id: ([id]: [string]) => id,
-      defaultConfig: GCacheKeyConfig.enabled(60),
-    })(async (id: string) => {
-      calls += 1;
-      await gate.promise;
-      return { id, calls };
-    });
+    const getUser = gcache.cached(
+      async (id: string) => {
+        calls += 1;
+        await gate.promise;
+        return { id, calls };
+      },
+      {
+        keyType: "user_id",
+        useCase: "Coalesce_ConcurrentMisses",
+        key: (id) => id,
+        defaultConfig: GCacheKeyConfig.enabled(60),
+      },
+    );
 
     const settled = await gcache.enable(async () => {
       const inflight = Promise.all([getUser("1"), getUser("1"), getUser("1")]);
@@ -97,16 +100,19 @@ describe("GCache single-flight coalescing", () => {
     const gate = deferred<void>();
     const redis = new FakeRedis();
     const gcache = new GCache({ redis: { client: redis } });
-    const getUser = gcache.cached({
-      keyType: "user_id",
-      useCase: "Coalesce_RedisChain",
-      id: ([id]: [string]) => id,
-      defaultConfig: remoteOnly,
-    })(async (id: string) => {
-      calls += 1;
-      await gate.promise;
-      return { id };
-    });
+    const getUser = gcache.cached(
+      async (id: string) => {
+        calls += 1;
+        await gate.promise;
+        return { id };
+      },
+      {
+        keyType: "user_id",
+        useCase: "Coalesce_RedisChain",
+        key: (id) => id,
+        defaultConfig: remoteOnly,
+      },
+    );
 
     const settled = await gcache.enable(async () => {
       const inflight = Promise.all([getUser("1"), getUser("1"), getUser("1")]);
@@ -124,19 +130,22 @@ describe("GCache single-flight coalescing", () => {
     let attempt = 0;
     const gate = deferred<void>();
     const gcache = new GCache();
-    const getUser = gcache.cached({
-      keyType: "user_id",
-      useCase: "Coalesce_LeaderRejects",
-      id: ([id]: [string]) => id,
-      defaultConfig: GCacheKeyConfig.enabled(60),
-    })(async (id: string) => {
-      attempt += 1;
-      if (attempt === 1) {
-        await gate.promise;
-        throw new Error("boom");
-      }
-      return { id, attempt };
-    });
+    const getUser = gcache.cached(
+      async (id: string) => {
+        attempt += 1;
+        if (attempt === 1) {
+          await gate.promise;
+          throw new Error("boom");
+        }
+        return { id, attempt };
+      },
+      {
+        keyType: "user_id",
+        useCase: "Coalesce_LeaderRejects",
+        key: (id) => id,
+        defaultConfig: GCacheKeyConfig.enabled(60),
+      },
+    );
 
     const outcomes = await gcache.enable(async () => {
       const inflight = Promise.all(
@@ -160,16 +169,19 @@ describe("GCache single-flight coalescing", () => {
     let calls = 0;
     const gate = deferred<void>();
     const gcache = new GCache();
-    const getUser = gcache.cached({
-      keyType: "user_id",
-      useCase: "Coalesce_DistinctKeys",
-      id: ([id]: [string]) => id,
-      defaultConfig: GCacheKeyConfig.enabled(60),
-    })(async (id: string) => {
-      calls += 1;
-      await gate.promise;
-      return id;
-    });
+    const getUser = gcache.cached(
+      async (id: string) => {
+        calls += 1;
+        await gate.promise;
+        return id;
+      },
+      {
+        keyType: "user_id",
+        useCase: "Coalesce_DistinctKeys",
+        key: (id) => id,
+        defaultConfig: GCacheKeyConfig.enabled(60),
+      },
+    );
 
     const settled = await gcache.enable(async () => {
       const inflight = Promise.all([getUser("1"), getUser("2")]);
@@ -187,16 +199,19 @@ describe("GCache single-flight coalescing", () => {
     let gate = deferred<void>();
     const gcache = new GCache();
     // Layers disabled (ramp 0): nothing is cached, so coalescing is the only dedup.
-    const getUser = gcache.cached({
-      keyType: "user_id",
-      useCase: "Coalesce_FreshAfterSettle",
-      id: ([id]: [string]) => id,
-      defaultConfig: disabledLayers,
-    })(async (id: string) => {
-      calls += 1;
-      await gate.promise;
-      return `${id}:${calls}`;
-    });
+    const getUser = gcache.cached(
+      async (id: string) => {
+        calls += 1;
+        await gate.promise;
+        return `${id}:${calls}`;
+      },
+      {
+        keyType: "user_id",
+        useCase: "Coalesce_FreshAfterSettle",
+        key: (id) => id,
+        defaultConfig: disabledLayers,
+      },
+    );
 
     const runBatch = () =>
       gcache.enable(async () => {
@@ -219,17 +234,20 @@ describe("GCache single-flight coalescing", () => {
     let calls = 0;
     const gate = deferred<void>();
     const gcache = new GCache();
-    const getUser = gcache.cached({
-      keyType: "user_id",
-      useCase: "Coalesce_DisabledStatic",
-      id: ([id]: [string]) => id,
-      coalesce: false,
-      defaultConfig: GCacheKeyConfig.enabled(60),
-    })(async (id: string) => {
-      calls += 1;
-      await gate.promise;
-      return id;
-    });
+    const getUser = gcache.cached(
+      async (id: string) => {
+        calls += 1;
+        await gate.promise;
+        return id;
+      },
+      {
+        keyType: "user_id",
+        useCase: "Coalesce_DisabledStatic",
+        key: (id) => id,
+        coalesce: false,
+        defaultConfig: GCacheKeyConfig.enabled(60),
+      },
+    );
 
     const settled = await gcache.enable(async () => {
       const inflight = Promise.all([getUser("1"), getUser("1"), getUser("1")]);
@@ -249,17 +267,20 @@ describe("GCache single-flight coalescing", () => {
       cacheConfigProvider: async () =>
         new GCacheKeyConfig({ ttlSec: { [CacheLayer.LOCAL]: 60 }, ramp: { [CacheLayer.LOCAL]: 100 }, coalesce: false }),
     });
-    const getUser = gcache.cached({
-      keyType: "user_id",
-      useCase: "Coalesce_RuntimeKillSwitch",
-      id: ([id]: [string]) => id,
-      coalesce: true,
-      defaultConfig: GCacheKeyConfig.enabled(60),
-    })(async (id: string) => {
-      calls += 1;
-      await gate.promise;
-      return id;
-    });
+    const getUser = gcache.cached(
+      async (id: string) => {
+        calls += 1;
+        await gate.promise;
+        return id;
+      },
+      {
+        keyType: "user_id",
+        useCase: "Coalesce_RuntimeKillSwitch",
+        key: (id) => id,
+        coalesce: true,
+        defaultConfig: GCacheKeyConfig.enabled(60),
+      },
+    );
 
     await gcache.enable(async () => {
       const inflight = Promise.all([getUser("1"), getUser("1")]);
@@ -276,16 +297,19 @@ describe("GCache single-flight coalescing", () => {
     const gate = deferred<void>();
     const { metrics, coalesced, observeFallback } = spyMetrics();
     const gcache = new GCache({ metrics });
-    const getUser = gcache.cached({
-      keyType: "user_id",
-      useCase: "Coalesce_Metrics",
-      id: ([id]: [string]) => id,
-      defaultConfig: GCacheKeyConfig.enabled(60),
-    })(async (id: string) => {
-      calls += 1;
-      await gate.promise;
-      return id;
-    });
+    const getUser = gcache.cached(
+      async (id: string) => {
+        calls += 1;
+        await gate.promise;
+        return id;
+      },
+      {
+        keyType: "user_id",
+        useCase: "Coalesce_Metrics",
+        key: (id) => id,
+        defaultConfig: GCacheKeyConfig.enabled(60),
+      },
+    );
 
     await gcache.enable(async () => {
       const inflight = Promise.all([getUser("1"), getUser("1"), getUser("1")]);
@@ -311,16 +335,19 @@ describe("GCache single-flight coalescing", () => {
       del: async () => 0,
     };
     const gcache = new GCache({ redis: { client: redis } });
-    const getUser = gcache.cached({
-      keyType: "user_id",
-      useCase: "Coalesce_RedisWriteError",
-      id: ([id]: [string]) => id,
-      defaultConfig: GCacheKeyConfig.enabled(60),
-    })(async (id: string) => {
-      calls += 1;
-      await gate.promise;
-      return id;
-    });
+    const getUser = gcache.cached(
+      async (id: string) => {
+        calls += 1;
+        await gate.promise;
+        return id;
+      },
+      {
+        keyType: "user_id",
+        useCase: "Coalesce_RedisWriteError",
+        key: (id) => id,
+        defaultConfig: GCacheKeyConfig.enabled(60),
+      },
+    );
 
     const settled = await gcache.enable(async () => {
       const inflight = Promise.all([getUser("1"), getUser("1")]);
@@ -337,16 +364,19 @@ describe("GCache single-flight coalescing", () => {
     let calls = 0;
     const gate = deferred<void>();
     const gcache = new GCache();
-    const getUser = gcache.cached({
-      keyType: "user_id",
-      useCase: "Coalesce_DisabledContext",
-      id: ([id]: [string]) => id,
-      defaultConfig: GCacheKeyConfig.enabled(60),
-    })(async (id: string) => {
-      calls += 1;
-      await gate.promise;
-      return id;
-    });
+    const getUser = gcache.cached(
+      async (id: string) => {
+        calls += 1;
+        await gate.promise;
+        return id;
+      },
+      {
+        keyType: "user_id",
+        useCase: "Coalesce_DisabledContext",
+        key: (id) => id,
+        defaultConfig: GCacheKeyConfig.enabled(60),
+      },
+    );
 
     const inflight = Promise.all([getUser("1"), getUser("1")]);
     await tick();
