@@ -56,6 +56,7 @@ export class GCache {
   private readonly rampSampler: CacheRampSampler;
   private readonly redisCache: RedisCache | null;
   private readonly metrics: GCacheMetricsAdapter | null;
+  private readonly inFlight = new Map<string, Promise<unknown>>();
 
   constructor(config: GCacheConfig = {}) {
     this.configProvider = config.cacheConfigProvider ?? defaultConfigProvider;
@@ -198,11 +199,15 @@ export class GCache {
       return local.value;
     }
 
-    const value = await this.callFallback(labelsFor(key, CacheLayer.LOCAL), fallback);
-    if (local.status === "miss") {
-      await this.putLocalFailOpen(key, value, local.config);
-    }
-    return value;
+    const runFallback = async (): Promise<T> => {
+      const value = await this.callFallback(labelsFor(key, CacheLayer.LOCAL), fallback);
+      if (local.status === "miss") {
+        await this.putLocalFailOpen(key, value, local.config);
+      }
+      return value;
+    };
+
+    return local.status === "miss" ? await this.singleFlight(key, runFallback) : await runFallback();
   }
 
   private async getThroughRedisChain<T>(
@@ -225,24 +230,29 @@ export class GCache {
     }
 
     const remoteErrored = remote.status === "disabled" && remote.reason === "config_error";
-    const fallbackLayer = remote.status === "miss" || remoteErrored ? CacheLayer.REMOTE : CacheLayer.LOCAL;
-    const value = await this.callFallback(labelsFor(key, fallbackLayer), fallback);
-    const skipCacheWrite = (remote.status === "miss" || remote.status === "disabled") && remote.skipCacheWrite === true;
-    let suppressCacheWrite = skipCacheWrite;
-    if (!suppressCacheWrite && (remote.status === "miss" || remoteErrored)) {
-      try {
-        const wroteRemote = await redisCache.put(key, value, remote.status === "miss" ? remote.config : undefined);
-        suppressCacheWrite = wroteRemote === false;
-      } catch (error) {
-        this.logger.warn("Error putting value in Redis cache", error);
-        this.recordError(key, CacheLayer.REMOTE, error, false);
-        suppressCacheWrite = key.trackForInvalidation;
+    const shouldCoalesce = local.status === "miss" || remote.status === "miss" || remoteErrored;
+    const runFallback = async (): Promise<T> => {
+      const fallbackLayer = remote.status === "miss" || remoteErrored ? CacheLayer.REMOTE : CacheLayer.LOCAL;
+      const value = await this.callFallback(labelsFor(key, fallbackLayer), fallback);
+      const skipCacheWrite = (remote.status === "miss" || remote.status === "disabled") && remote.skipCacheWrite === true;
+      let suppressCacheWrite = skipCacheWrite;
+      if (!suppressCacheWrite && (remote.status === "miss" || remoteErrored)) {
+        try {
+          const wroteRemote = await redisCache.put(key, value, remote.status === "miss" ? remote.config : undefined);
+          suppressCacheWrite = wroteRemote === false;
+        } catch (error) {
+          this.logger.warn("Error putting value in Redis cache", error);
+          this.recordError(key, CacheLayer.REMOTE, error, false);
+          suppressCacheWrite = key.trackForInvalidation;
+        }
       }
-    }
-    if (!suppressCacheWrite && local.status === "miss") {
-      await this.putLocalFailOpen(key, value, local.config);
-    }
-    return value;
+      if (!suppressCacheWrite && local.status === "miss") {
+        await this.putLocalFailOpen(key, value, local.config);
+      }
+      return value;
+    };
+
+    return shouldCoalesce ? await this.singleFlight(key, runFallback) : await runFallback();
   }
 
   private async readLocal<T>(key: GCacheKey, keyConfig: GCacheKeyConfig | null) {
@@ -338,6 +348,22 @@ export class GCache {
       trackForInvalidation: options.trackForInvalidation ?? false,
     });
   }
+
+  private singleFlight<T>(key: GCacheKey, run: () => Promise<T>): Promise<T> {
+    const existing = this.inFlight.get(key.urn);
+    if (existing !== undefined) {
+      this.metrics?.coalesced?.({ useCase: key.useCase, keyType: key.keyType });
+      return existing as Promise<T>;
+    }
+
+    const promise = run();
+    this.inFlight.set(key.urn, promise);
+    const clear = (): void => {
+      this.inFlight.delete(key.urn);
+    };
+    void promise.then(clear, clear);
+    return promise;
+  }
 }
 
 function elapsedSeconds(startMs: number): number {
@@ -361,6 +387,7 @@ function safeMetrics(metrics: GCacheMetricsAdapter | null): GCacheMetricsAdapter
     disabled: (labels) => callMetric(() => metrics.disabled(labels)),
     error: (labels) => callMetric(() => metrics.error(labels)),
     invalidation: (labels) => callMetric(() => metrics.invalidation(labels)),
+    coalesced: (labels) => callMetric(() => metrics.coalesced?.(labels)),
     observeGet: (labels, seconds) => callMetric(() => metrics.observeGet(labels, seconds)),
     observeFallback: (labels, seconds) => callMetric(() => metrics.observeFallback(labels, seconds)),
     observeSerialization: (labels, seconds) => callMetric(() => metrics.observeSerialization(labels, seconds)),

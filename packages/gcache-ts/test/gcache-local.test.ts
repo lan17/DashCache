@@ -189,7 +189,7 @@ describe("GCache local-only MVP", () => {
     expect(calls).toBe(1);
   });
 
-  it("runs every concurrent fallback for the same uncached key", async () => {
+  it("coalesces concurrent fallbacks when a cache layer is active", async () => {
     // Given two concurrent requests miss the same local cache key.
     const gate = deferred<void>();
     const gcache = new GCache();
@@ -203,7 +203,7 @@ describe("GCache local-only MVP", () => {
       },
       {
         keyType: "user_id",
-        useCase: "ConcurrentMissesPassThrough",
+        useCase: "ConcurrentMissesCoalesce",
         cacheKey: (userId) => userId,
         defaultConfig: GCacheKeyConfig.enabled(60),
       },
@@ -215,7 +215,44 @@ describe("GCache local-only MVP", () => {
     gate.resolve();
     const results = await inflight;
 
-    // Then each request runs the fallback; GCache does not single-flight/coalesce.
+    // Then the active cache miss single-flights so only one fallback populates the cache.
+    expect(results).toEqual([
+      { userId: "123", calls: 1 },
+      { userId: "123", calls: 1 },
+    ]);
+    expect(calls).toBe(1);
+  });
+
+  it("runs every concurrent fallback when all cache layers are disabled", async () => {
+    // Given caching is enabled at the context level but the local layer is ramped out.
+    const gate = deferred<void>();
+    const gcache = new GCache();
+    let calls = 0;
+    const getUser = gcache.cached(
+      async (userId: string) => {
+        calls += 1;
+        const call = calls;
+        await gate.promise;
+        return { userId, calls: call };
+      },
+      {
+        keyType: "user_id",
+        useCase: "ConcurrentDisabledLayersPassThrough",
+        cacheKey: (userId) => userId,
+        defaultConfig: new GCacheKeyConfig({
+          ttlSec: { [CacheLayer.LOCAL]: 60 },
+          ramp: { [CacheLayer.LOCAL]: 0 },
+        }),
+      },
+    );
+
+    // When both requests run before either fallback completes.
+    const inflight = gcache.enable(async () => await Promise.all([getUser("123"), getUser("123")]));
+    await tick();
+    gate.resolve();
+    const results = await inflight;
+
+    // Then disabled cache layers are true pass-through and do not single-flight.
     expect(results).toEqual([
       { userId: "123", calls: 1 },
       { userId: "123", calls: 2 },

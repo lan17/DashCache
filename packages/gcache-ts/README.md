@@ -1,6 +1,6 @@
 # @rungalileo/gcache
 
-TypeScript port of GCache. Milestone 5 ships explicit enabled contexts, stable key construction, local/Redis TTL caching, runtime config providers, gradual rollout ramp controls, Prometheus-ready observability, and Redis watermark-based targeted invalidation.
+TypeScript port of GCache. Milestone 5 ships explicit enabled contexts, stable key construction, local/Redis TTL caching, runtime config providers, gradual rollout ramp controls, request coalescing for active cache misses, Prometheus-ready observability, and Redis watermark-based targeted invalidation.
 
 > [!NOTE]
 > TypeScript support is experimental for now. This package is intended for early validation and feedback before treating the API and operational behavior as stable.
@@ -147,6 +147,24 @@ const gcache = new GCache({
 
 `ramp` values are percentages from 0 to 100. `0` disables the layer, `100` enables it, and intermediate values use `rampSampler`; the default sampler is deterministic by cache key and layer, so the same key is consistently sampled in or out of a partial rollout. Provider errors fail open and execute the fallback function.
 
+## Request coalescing
+
+When caching is enabled and a call misses an active cache layer, concurrent callers for the same cache key share the same in-flight fallback. The leader runs the fallback and cache write; followers await that result. This protects the source of truth from a thundering herd on hot keys.
+
+Coalescing only applies after a real cache layer is active. Calls outside `enable()` are true pass-through, and calls where every layer is disabled by missing config, invalid TTL, or ramp are also true pass-through.
+
+```ts
+const getUser = gcache.cached(
+  (userId: string) => db.fetchUser(userId),
+  {
+    keyType: "user_id",
+    useCase: "GetUser",
+    cacheKey: (userId) => userId,
+    defaultConfig: GCacheKeyConfig.enabled(60),
+  },
+);
+```
+
 ## Enabled context
 
 Caching is **off by default** and only active inside a `gcache.enable(...)` scope. This is deliberate: it lets you turn caching **off in write paths** so a stale read can't be cached around a write. The TypeScript port uses Node `AsyncLocalStorage` to mirror Python's `with gcache.enable():` model.
@@ -202,6 +220,7 @@ GCache registers Prometheus metrics by default via `prom-client`. Metric names i
 | `gcache_disabled_counter` | Counter | `use_case`, `key_type`, `layer`, `reason` | Cache skips (`context`, `missing_config`, `invalid_ttl`, `ramped_down`, `config_error`) |
 | `gcache_error_counter` | Counter | `use_case`, `key_type`, `layer`, `error`, `in_fallback` | Cache/fallback errors, with `in_fallback` separating cache plumbing failures from application fallback failures |
 | `gcache_invalidation_counter` | Counter | `key_type`, `layer` | Invalidation calls for the layers touched today |
+| `gcache_coalesced_counter` | Counter | `use_case`, `key_type` | Requests that awaited an active in-flight cache miss |
 | `gcache_get_timer` | Histogram | `use_case`, `key_type`, `layer` | Cache get latency in seconds |
 | `gcache_fallback_timer` | Histogram | `use_case`, `key_type`, `layer` | Time spent in the underlying function |
 | `gcache_serialization_timer` | Histogram | `use_case`, `key_type`, `layer`, `operation` | Redis serializer dump/load latency |
@@ -255,11 +274,11 @@ Included:
 - Redis Cluster hash-tagged value/watermark keys for invalidation-tracked entries
 - Configurable Redis watermark TTL via `redis.watermarkTtlSec` with `DEFAULT_WATERMARK_TTL_SEC`
 - Future-buffer behavior that avoids cache writes during active invalidation windows
+- Request coalescing for active cache misses
 
 Not included yet:
 
 - Framework middleware helpers/integrations
 - `cachedObject`
-- Request coalescing / single-flight
 - Expanded examples
 - Release hardening

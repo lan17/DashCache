@@ -30,12 +30,19 @@ export interface InvalidationMetricLabels {
   readonly layer: CacheLayer;
 }
 
+export interface CoalescedMetricLabels {
+  readonly useCase: string;
+  readonly keyType: string;
+}
+
 export interface GCacheMetricsAdapter {
   request(labels: CacheMetricLabels): void;
   miss(labels: CacheMetricLabels): void;
   disabled(labels: DisabledMetricLabels): void;
   error(labels: ErrorMetricLabels): void;
   invalidation(labels: InvalidationMetricLabels): void;
+  // Optional so existing custom adapters keep compiling without changes.
+  coalesced?(labels: CoalescedMetricLabels): void;
   observeGet(labels: CacheMetricLabels, seconds: number): void;
   observeFallback(labels: CacheMetricLabels, seconds: number): void;
   observeSerialization(labels: SerializationMetricLabels, seconds: number): void;
@@ -52,6 +59,7 @@ type DisabledLabels = CounterLabels | "reason";
 type ErrorLabels = CounterLabels | "error" | "in_fallback";
 type SerializationLabels = CounterLabels | "operation";
 type InvalidationLabels = "key_type" | "layer";
+type CoalescedLabels = "use_case" | "key_type";
 
 const TIMER_BUCKETS = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10];
 const SIZE_BUCKETS = [100, 1_000, 10_000, 100_000, 1_000_000, 10_000_000];
@@ -62,6 +70,7 @@ export class PrometheusGCacheMetrics implements GCacheMetricsAdapter {
   private readonly disabledCounter: Counter<DisabledLabels>;
   private readonly errorCounter: Counter<ErrorLabels>;
   private readonly invalidationCounter: Counter<InvalidationLabels>;
+  private readonly coalescedCounter: Counter<CoalescedLabels>;
   private readonly getTimer: Histogram<CounterLabels>;
   private readonly fallbackTimer: Histogram<CounterLabels>;
   private readonly serializationTimer: Histogram<SerializationLabels>;
@@ -95,6 +104,11 @@ export class PrometheusGCacheMetrics implements GCacheMetricsAdapter {
       name: `${prefix}gcache_invalidation_counter`,
       help: "GCache invalidation calls by key type and layer.",
       labelNames: ["key_type", "layer"] as const,
+    });
+    this.coalescedCounter = counter(registry, {
+      name: `${prefix}gcache_coalesced_counter`,
+      help: "GCache requests coalesced onto an in-flight cache miss.",
+      labelNames: ["use_case", "key_type"] as const,
     });
     this.getTimer = histogram(registry, {
       name: `${prefix}gcache_get_timer`,
@@ -144,6 +158,10 @@ export class PrometheusGCacheMetrics implements GCacheMetricsAdapter {
 
   invalidation(labels: InvalidationMetricLabels): void {
     this.invalidationCounter.inc({ key_type: labels.keyType, layer: labels.layer });
+  }
+
+  coalesced(labels: CoalescedMetricLabels): void {
+    this.coalescedCounter.inc({ use_case: labels.useCase, key_type: labels.keyType });
   }
 
   observeGet(labels: CacheMetricLabels, seconds: number): void {
