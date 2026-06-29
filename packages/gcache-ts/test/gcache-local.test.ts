@@ -35,6 +35,27 @@ describe("GCache local-only MVP", () => {
     expect(calls).toBe(2);
   });
 
+  it("does not evaluate explicit key selectors when caching is disabled", async () => {
+    // Given a cached function with a key selector that would fail if caching tried to build a key.
+    const gcache = new GCache();
+    let calls = 0;
+    const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
+      keyType: "user_id",
+      useCase: "DisabledContextSkipsKeySelector",
+      key: () => {
+        throw new Error("key selector should not run outside an enabled context");
+      },
+      defaultConfig: GCacheKeyConfig.enabled(60),
+    });
+
+    // When the function is called outside an enabled context.
+    const value = await getUser("123");
+
+    // Then the fallback executes without consulting cache key construction.
+    expect(value).toEqual({ userId: "123", calls: 1 });
+    expect(calls).toBe(1);
+  });
+
   it("supports metrics-disabled local caching and no-op invalidation without Redis", async () => {
     // Given metrics may be explicitly disabled and Redis may be absent.
     const gcache = new GCache({ metrics: false });
@@ -256,6 +277,30 @@ describe("GCache local-only MVP", () => {
     // Then the fallback still succeeds and no value is cached.
     expect(first).toEqual({ calls: 1 });
     expect(second).toEqual({ calls: 2 });
+    expect(logger.error).toHaveBeenCalledWith("Could not construct GCache key", expect.any(Error));
+  });
+
+  it("fails open when an explicit key selector throws", async () => {
+    // Given a cached function whose key selector throws before a cache key can be built.
+    const logger = { debug: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const gcache = new GCache({ logger });
+    let calls = 0;
+    const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
+      keyType: "user_id",
+      useCase: "KeySelectorFailure",
+      key: () => {
+        throw new Error("bad selector");
+      },
+      defaultConfig: GCacheKeyConfig.enabled(60),
+    });
+
+    // When the cached function is called in an enabled scope.
+    const first = await gcache.enable(async () => await getUser("123"));
+    const second = await gcache.enable(async () => await getUser("123"));
+
+    // Then the fallback still succeeds and no value is cached.
+    expect(first).toEqual({ userId: "123", calls: 1 });
+    expect(second).toEqual({ userId: "123", calls: 2 });
     expect(logger.error).toHaveBeenCalledWith("Could not construct GCache key", expect.any(Error));
   });
 
