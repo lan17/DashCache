@@ -162,6 +162,7 @@ describe("GCache targeted invalidation watermarks", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "TrackedAtomicRead",
+      key: (userId) => userId,
       trackForInvalidation: true,
       defaultConfig: remoteOnly(),
     });
@@ -313,12 +314,14 @@ describe("GCache targeted invalidation watermarks", () => {
     const getProfile = gcache.cached(async (userId: string) => ({ userId, profileVersion }), {
       keyType: "user_id",
       useCase: "InvalidateProfile",
+      key: (userId) => userId,
       trackForInvalidation: true,
       defaultConfig: remoteOnly(),
     });
     const getPermissions = gcache.cached(async (userId: string) => ({ userId, permissionsVersion }), {
       keyType: "user_id",
       useCase: "InvalidatePermissions",
+      key: (userId) => userId,
       trackForInvalidation: true,
       defaultConfig: remoteOnly(),
     });
@@ -355,6 +358,7 @@ describe("GCache targeted invalidation watermarks", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "FutureBufferUser",
+      key: (userId) => userId,
       trackForInvalidation: true,
       defaultConfig: localAndRemote(),
     });
@@ -387,6 +391,7 @@ describe("GCache targeted invalidation watermarks", () => {
       {
         keyType: "user_id",
         useCase: "FutureBufferFallbackRace",
+        key: (userId) => userId,
         trackForInvalidation: true,
         defaultConfig: localAndRemote(),
       },
@@ -413,6 +418,7 @@ describe("GCache targeted invalidation watermarks", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "TrackedMalformedEnvelope",
+      key: (userId) => userId,
       trackForInvalidation: true,
       defaultConfig: localAndRemote(),
     });
@@ -484,6 +490,7 @@ describe("GCache targeted invalidation watermarks", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, version }), {
       keyType: "user_id",
       useCase: "LocalInvalidationLimit",
+      key: (userId) => userId,
       trackForInvalidation: true,
       defaultConfig: localAndRemote(),
     });
@@ -527,6 +534,7 @@ describe("GCache targeted invalidation watermarks", () => {
     const getUser = readGCache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "WatermarkReadFailOpen",
+      key: (userId) => userId,
       trackForInvalidation: true,
       defaultConfig: localAndRemote(),
     });
@@ -556,6 +564,7 @@ describe("GCache targeted invalidation watermarks", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "MalformedWatermarkFailOpen",
+      key: (userId) => userId,
       trackForInvalidation: true,
       defaultConfig: localAndRemote(),
     });
@@ -586,6 +595,7 @@ describe("CachedFn invalidate/delete handle sugar", () => {
       {
         keyType: "user_id",
         useCase: "HandleSugar",
+        key: (id) => id,
         trackForInvalidation: true,
         defaultConfig: new GCacheKeyConfig({ ttlSec: { [CacheLayer.REMOTE]: 300 }, ramp: { [CacheLayer.REMOTE]: 100 } }),
       },
@@ -602,5 +612,18 @@ describe("CachedFn invalidate/delete handle sugar", () => {
     // handle.delete(id) removes the entry, so the next read re-runs the loader again.
     await getUser.delete("123");
     expect(await gcache.enable(() => getUser("123"))).toEqual({ id: "123", calls: 3 });
+  });
+
+  it("delete(id) reports key construction failures as promise rejections", async () => {
+    const gcache = new GCache();
+    const getUser = gcache.cached(async (id: string) => id, {
+      keyType: "user_id",
+      useCase: "HandleDeleteKeyConstructionFailure",
+      key: (id) => id,
+      trackForInvalidation: true,
+      defaultConfig: GCacheKeyConfig.enabled(60),
+    });
+
+    await expect(getUser.delete("bad{id")).rejects.toThrow("Redis Cluster hash tag components must not contain braces");
   });
 });

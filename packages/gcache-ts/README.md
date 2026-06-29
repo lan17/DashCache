@@ -20,7 +20,12 @@ const gcache = new GCache();
 
 const getUser = gcache.cached(
   (userId: string) => db.fetchUser(userId),
-  { keyType: "user_id", useCase: "GetUser", defaultConfig: GCacheKeyConfig.enabled(60) },
+  {
+    keyType: "user_id",
+    useCase: "GetUser",
+    key: (userId) => userId,
+    defaultConfig: GCacheKeyConfig.enabled(60),
+  },
 );
 
 // Caching is OFF outside an enable() scope (see "Enabled context"), so this runs the fn uncached:
@@ -95,6 +100,7 @@ const getUser = gcache.cached(
   {
     keyType: "user_id",
     useCase: "GetMutableUser",
+    key: (userId) => userId,
     trackForInvalidation: true,
     // Strongly invalidated mutable data should usually disable local cache.
     defaultConfig: new GCacheKeyConfig({
@@ -186,7 +192,7 @@ await gcache.enable(async () => {
 
 ## Keys, ids, and extra dimensions
 
-`cached(fn, options)` wraps a function; the wrapped callable has the same signature. The cache key comes from an optional `key` selector whose parameters are inferred from `fn`. Omit `key` and the **first argument is the id**. Provide `key` to extract a field or add secondary dimensions:
+`cached(fn, options)` wraps a function; the wrapped callable has the same parameters and always returns a `Promise`. The cache key comes from a required `key` selector whose parameters are inferred from `fn`. Return a bare id, or return `{ id, args }` to extract a field or add secondary dimensions:
 
 ```ts
 const searchPosts = gcache.cached(

@@ -22,6 +22,7 @@ describe("GCache local-only MVP", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "GetUserDefaultDisabled",
+      key: (userId) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
     });
 
@@ -63,6 +64,7 @@ describe("GCache local-only MVP", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "MetricsDisabledNoRedis",
+      key: (userId) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
     });
 
@@ -83,6 +85,7 @@ describe("GCache local-only MVP", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "GetUserEnabled",
+      key: (userId) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
     });
 
@@ -102,6 +105,7 @@ describe("GCache local-only MVP", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "GetUserNestedDisable",
+      key: (userId) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
     });
 
@@ -127,6 +131,7 @@ describe("GCache local-only MVP", () => {
     const getValue = gcache.cached(async (tenantId: string) => ({ tenantId, calls: ++calls }), {
       keyType: "tenant_id",
       useCase: "ParallelContextIsolation",
+      key: (tenantId) => tenantId,
       defaultConfig: GCacheKeyConfig.enabled(60),
     });
 
@@ -152,6 +157,7 @@ describe("GCache local-only MVP", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "PromiseAllContext",
+      key: (userId) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
     });
 
@@ -232,6 +238,7 @@ describe("GCache local-only MVP", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "LocalTtlExpiration",
+      key: (userId) => userId,
       defaultConfig: new GCacheKeyConfig({
         ttlSec: { [CacheLayer.LOCAL]: 1 },
         ramp: { [CacheLayer.LOCAL]: 100 },
@@ -311,6 +318,7 @@ describe("GCache local-only MVP", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "ScopeFailureRestore",
+      key: (userId) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
     });
 
@@ -351,6 +359,7 @@ describe("GCache local-only MVP", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "LocalWriteFailOpen",
+      key: (userId) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
     });
 
@@ -374,6 +383,7 @@ describe("GCache local-only MVP", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "MissingConfigFailure",
+      key: (userId) => userId,
     });
 
     // When the cached function is called in an enabled scope.
@@ -394,6 +404,7 @@ describe("GCache local-only MVP", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "DeleteAndFlush",
+      key: (userId) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
     });
     await gcache.enable(async () => {
@@ -425,6 +436,7 @@ describe("GCache local-only MVP", () => {
     gcache.cached(async (userId: string) => userId, {
       keyType: "user_id",
       useCase: "UniqueUseCase",
+      key: (userId) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
     });
 
@@ -433,12 +445,14 @@ describe("GCache local-only MVP", () => {
       gcache.cached(async (userId: string) => userId, {
         keyType: "user_id",
         useCase: "UniqueUseCase",
+        key: (userId) => userId,
         defaultConfig: GCacheKeyConfig.enabled(60),
       });
     const reserved = () =>
       gcache.cached(async (userId: string) => userId, {
         keyType: "user_id",
         useCase: "watermark",
+        key: (userId) => userId,
         defaultConfig: GCacheKeyConfig.enabled(60),
       });
 
@@ -454,6 +468,7 @@ describe("GCache local-only MVP", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "AliasScopes",
+      key: (userId) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
     });
 
@@ -481,6 +496,7 @@ describe("GCache local-only MVP", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "InvalidLocalTtl",
+      key: (userId) => userId,
       defaultConfig: new GCacheKeyConfig({
         ttlSec: { [CacheLayer.LOCAL]: 0 },
         ramp: { [CacheLayer.LOCAL]: 100 },
@@ -505,6 +521,7 @@ describe("GCache local-only MVP", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "LocalMaxSizeEviction",
+      key: (userId) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
     });
 

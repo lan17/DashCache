@@ -87,6 +87,7 @@ describe("GCache Redis TTL layer", () => {
     const writeUser = writer.cached(async (userId: string) => ({ userId, calls: ++writerCalls }), {
       keyType: "user_id",
       useCase: "RedisLocalPopulate",
+      key: (userId) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
     });
     await writer.enable(async () => await writeUser("123"));
@@ -96,6 +97,7 @@ describe("GCache Redis TTL layer", () => {
     const readUser = reader.cached(async (userId: string) => ({ userId, calls: ++readerCalls }), {
       keyType: "user_id",
       useCase: "RedisLocalPopulate",
+      key: (userId) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
     });
     redis.getCalls = 0;
@@ -119,6 +121,7 @@ describe("GCache Redis TTL layer", () => {
     const writeUser = writer.cached(async (userId: string) => ({ userId, source: "redis" }), {
       keyType: "user_id",
       useCase: "RedisNoDisabledLocalPopulate",
+      key: (userId) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
     });
     await writer.enable(async () => await writeUser("123"));
@@ -136,6 +139,7 @@ describe("GCache Redis TTL layer", () => {
     const readUser = reader.cached(async (userId: string) => ({ userId, source: `fallback-${++readerCalls}` }), {
       keyType: "user_id",
       useCase: "RedisNoDisabledLocalPopulate",
+      key: (userId) => userId,
     });
     redis.getCalls = 0;
 
@@ -161,6 +165,7 @@ describe("GCache Redis TTL layer", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "RedisEnvelopeWrite",
+      key: (userId) => userId,
       defaultConfig: GCacheKeyConfig.enabled(30),
     });
 
@@ -201,6 +206,7 @@ describe("GCache Redis TTL layer", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "RedisClientFactoryRetry",
+      key: (userId) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
     });
 
@@ -231,6 +237,7 @@ describe("GCache Redis TTL layer", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "RedisClientFactory",
+      key: (userId) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
     });
 
@@ -256,6 +263,7 @@ describe("GCache Redis TTL layer", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "RedisFailOpen",
+      key: (userId) => userId,
       defaultConfig: new GCacheKeyConfig({
         ttlSec: { [CacheLayer.LOCAL]: 0, [CacheLayer.REMOTE]: 60 },
         ramp: { [CacheLayer.LOCAL]: 100, [CacheLayer.REMOTE]: 100 },
@@ -287,6 +295,7 @@ describe("GCache Redis TTL layer", () => {
     const readFromWriter = writer.cached(async (userId: string) => ({ id: userId, source: "fallback" }), {
       keyType: "user_id",
       useCase: "RedisCustomSerializer",
+      key: (userId) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
       serializer,
     });
@@ -297,6 +306,7 @@ describe("GCache Redis TTL layer", () => {
     const readFromRedis = reader.cached(async (userId: string) => ({ id: userId, source: `fallback-${++readerCalls}` }), {
       keyType: "user_id",
       useCase: "RedisCustomSerializer",
+      key: (userId) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
       serializer,
     });
@@ -328,6 +338,7 @@ describe("GCache Redis TTL layer", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "RedisSerializerDumpFailure",
+      key: (userId) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
       serializer,
     });
@@ -374,6 +385,7 @@ describe("GCache Redis TTL layer", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, source: `fallback-${++calls}` }), {
       keyType: "user_id",
       useCase: "RedisSerializerLoadFailure",
+      key: (userId) => userId,
       defaultConfig: new GCacheKeyConfig({
         ttlSec: { [CacheLayer.LOCAL]: 0, [CacheLayer.REMOTE]: 60 },
         ramp: { [CacheLayer.LOCAL]: 100, [CacheLayer.REMOTE]: 100 },
@@ -424,6 +436,7 @@ describe("GCache Redis TTL layer", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "RedisBadEnvelope",
+      key: (userId) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
     });
 
@@ -464,6 +477,7 @@ describe("GCache Redis TTL layer", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "RedisMissingRemoteTtl",
+      key: (userId) => userId,
       defaultConfig: new GCacheKeyConfig({
         ttlSec: { [CacheLayer.LOCAL]: 0 },
         ramp: { [CacheLayer.LOCAL]: 100 },
@@ -535,6 +549,7 @@ describe("GCache Redis TTL layer", () => {
       const getValue = gcache.cached(async (userId: string) => ({ userId }), {
         keyType: "user_id",
         useCase,
+        key: (userId) => userId,
         defaultConfig: GCacheKeyConfig.enabled(60),
       });
       await gcache.enable(async () => await getValue("123"));
@@ -562,6 +577,7 @@ describe("GCache Redis TTL layer", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId }), {
       keyType: "user_id",
       useCase: "RedisMissingFlushCommand",
+      key: (userId) => userId,
       defaultConfig: new GCacheKeyConfig({
         ttlSec: { [CacheLayer.LOCAL]: 0, [CacheLayer.REMOTE]: 60 },
         ramp: { [CacheLayer.LOCAL]: 100, [CacheLayer.REMOTE]: 100 },
@@ -593,6 +609,7 @@ describe("GCache Redis TTL layer", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "RedisDeleteAndFlush",
+      key: (userId) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
     });
     await gcache.enable(async () => {

@@ -100,11 +100,13 @@ describe("GCache observability metrics", () => {
     const first = firstCache.cached(async (userId: string) => ({ userId }), {
       keyType: "user_id",
       useCase: "DuplicateMetricRegistrationFirst",
+      key: (userId) => userId,
       defaultConfig: localOnly(),
     });
     const second = secondCache.cached(async (userId: string) => ({ userId }), {
       keyType: "user_id",
       useCase: "DuplicateMetricRegistrationSecond",
+      key: (userId) => userId,
       defaultConfig: localOnly(),
     });
 
@@ -127,6 +129,7 @@ describe("GCache observability metrics", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "CustomMetricsAdapter",
+      key: (userId) => userId,
       defaultConfig: localOnly(),
     });
 
@@ -161,6 +164,7 @@ describe("GCache observability metrics", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "ThrowingMetricsFailOpen",
+      key: (userId) => userId,
       defaultConfig: localOnly(),
     });
 
@@ -180,20 +184,24 @@ describe("GCache observability metrics", () => {
     const contextDisabled = gcache.cached(async (userId: string) => userId, {
       keyType: "user_id",
       useCase: "DisabledByContext",
+      key: (userId) => userId,
       defaultConfig: localOnly(),
     });
     const missingConfig = gcache.cached(async (userId: string) => userId, {
       keyType: "user_id",
       useCase: "DisabledByMissingConfig",
+      key: (userId) => userId,
     });
     const invalidTtl = gcache.cached(async (userId: string) => userId, {
       keyType: "user_id",
       useCase: "DisabledByInvalidTtl",
+      key: (userId) => userId,
       defaultConfig: localOnly(0),
     });
     const rampedDown = gcache.cached(async (userId: string) => userId, {
       keyType: "user_id",
       useCase: "DisabledByRamp",
+      key: (userId) => userId,
       defaultConfig: new GCacheKeyConfig({
         ttlSec: { [CacheLayer.LOCAL]: 60 },
         ramp: { [CacheLayer.LOCAL]: 0 },
@@ -227,6 +235,7 @@ describe("GCache observability metrics", () => {
     const readThroughFailure = cacheFailure.cached(async (userId: string) => ({ userId }), {
       keyType: "user_id",
       useCase: "CacheErrorClassification",
+      key: (userId) => userId,
       defaultConfig: remoteOnly(),
     });
     const fallbackCache = new GCache({ redis: { client: new FakeRedis() }, metrics, logger });
@@ -235,6 +244,7 @@ describe("GCache observability metrics", () => {
     }, {
       keyType: "user_id",
       useCase: "FallbackErrorClassification",
+      key: (userId) => userId,
       defaultConfig: remoteOnly(),
     });
 
@@ -270,6 +280,7 @@ describe("GCache observability metrics", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "PrometheusMetricExport",
+      key: (userId) => userId,
       defaultConfig: remoteOnly(),
     });
 
