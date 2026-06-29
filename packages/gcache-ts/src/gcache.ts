@@ -1,6 +1,15 @@
 import { performance } from "node:perf_hooks";
 
-import { CacheLayer, GCacheConfig, GCacheKeyConfig, randomRampSampler, type CacheConfigProvider, type CacheRampSampler, type Logger } from "./config.js";
+import {
+  CacheLayer,
+  GCacheKeyConfig,
+  deterministicRampSampler,
+  type Awaitable,
+  type CacheConfigProvider,
+  type CacheRampSampler,
+  type GCacheConfig,
+  type Logger,
+} from "./config.js";
 import { GCacheContext } from "./context.js";
 import { UseCaseIsAlreadyRegisteredError, UseCaseNameIsReservedError } from "./errors.js";
 import { GCacheKey, normalizeArgs } from "./key.js";
@@ -10,7 +19,6 @@ import { LocalCache } from "./internal/local-cache.js";
 import { RedisCache } from "./internal/redis-cache.js";
 import { fetchKeyConfig } from "./internal/runtime-config.js";
 
-type Awaitable<T> = T | Promise<T>;
 type CacheArgs = Record<string, string | number | boolean | bigint | null | undefined>;
 type Id = string | number | bigint;
 
@@ -32,16 +40,15 @@ export interface CachedOptions<Fn extends AnyFn> {
   // Coalesce concurrent misses for this use case into one in-flight fallback.
   // Defaults to the instance's coalesceByDefault (true); runtime config wins.
   readonly coalesce?: boolean;
-  readonly key: KeySelector<Fn>;
+  readonly cacheKey: KeySelector<Fn>;
 }
 
 export interface CachedFn<Fn extends AnyFn> {
   (...args: Parameters<Fn>): Promise<CachedValue<Fn>>;
-  delete(id: Id, args?: CacheArgs): Promise<boolean>;
 }
 
 const DEFAULT_LOCAL_MAX_SIZE = 10_000;
-const defaultConfigProvider: CacheConfigProvider = async () => null;
+const defaultConfigProvider: CacheConfigProvider = () => null;
 const defaultLogger: Logger = console;
 
 export class GCache {
@@ -61,7 +68,7 @@ export class GCache {
     this.configProvider = config.cacheConfigProvider ?? defaultConfigProvider;
     this.urnPrefix = config.urnPrefix ?? "urn";
     this.logger = config.logger ?? defaultLogger;
-    this.rampSampler = config.rampSampler ?? randomRampSampler;
+    this.rampSampler = config.rampSampler ?? deterministicRampSampler;
     this.coalesceByDefault = config.coalesceByDefault ?? true;
     const metrics =
       config.metrics === false
@@ -123,7 +130,7 @@ export class GCache {
 
       let key: GCacheKey;
       try {
-        key = this.buildKey(options, options.key(...args));
+        key = this.buildKey(options, options.cacheKey(...args));
       } catch (error) {
         this.logger.error("Could not construct GCache key", error);
         this.metrics?.error({
@@ -163,30 +170,12 @@ export class GCache {
       return await runThroughCache();
     };
 
-    return Object.assign(run, {
-      delete: async (id: Id, args?: CacheArgs): Promise<boolean> =>
-        await this.delete(this.buildKey(options, args === undefined ? id : { id, args })),
-    });
-  }
-
-  async delete(key: GCacheKey): Promise<boolean> {
-    this.metrics?.invalidation({ keyType: key.keyType, layer: CacheLayer.LOCAL });
-    const localDeleted = await this.localCache.delete(key);
-    if (this.redisCache === null) {
-      return localDeleted;
-    }
-
-    this.metrics?.invalidation({ keyType: key.keyType, layer: CacheLayer.REMOTE });
-    try {
-      return (await this.redisCache.delete(key)) || localDeleted;
-    } catch (error) {
-      this.logger.warn("Error deleting value from Redis cache", error);
-      this.recordError(key, CacheLayer.REMOTE, error, false);
-      throw error;
-    }
+    return run;
   }
 
   async invalidate(keyType: string, id: Id, futureBufferMs = 0): Promise<void> {
+    assertValidFutureBufferMs(futureBufferMs);
+
     if (this.redisCache === null) {
       return;
     }
@@ -396,6 +385,12 @@ export class GCache {
 
 function elapsedSeconds(startMs: number): number {
   return Math.max((performance.now() - startMs) / 1000, 0);
+}
+
+function assertValidFutureBufferMs(futureBufferMs: number): void {
+  if (!Number.isFinite(futureBufferMs) || futureBufferMs < 0) {
+    throw new RangeError("GCache invalidation futureBufferMs must be a finite nonnegative number");
+  }
 }
 
 function safeMetrics(metrics: GCacheMetricsAdapter | null): GCacheMetricsAdapter | null {

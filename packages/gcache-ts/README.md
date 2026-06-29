@@ -23,7 +23,7 @@ const getUser = gcache.cached(
   {
     keyType: "user_id",
     useCase: "GetUser",
-    key: (userId) => userId,
+    cacheKey: (userId) => userId,
     defaultConfig: GCacheKeyConfig.enabled(60),
   },
 );
@@ -59,7 +59,7 @@ local cache -> Redis cache -> fallback function
 - Local hits return immediately.
 - Local misses try Redis and populate local on a Redis hit.
 - Redis misses call the fallback and write both Redis and local.
-- Redis cache read/write failures are logged, counted in metrics, and fail open; fallback results still return when fallback succeeds. Explicit maintenance calls (`delete`, `invalidate`, `flushAll`) log/count Redis failures and rethrow them so callers do not assume mutation succeeded.
+- Redis cache read/write failures are logged, counted in metrics, and fail open; fallback results still return when fallback succeeds. Explicit maintenance calls (`invalidate`, `flushAll`) log/count Redis failures and rethrow them so callers do not assume mutation succeeded.
 - Missing per-layer config disables that layer, records a disabled reason, and falls through to the next layer/fallback.
 
 You can also provide `createClient` for lazy client construction:
@@ -100,7 +100,7 @@ const getUser = gcache.cached(
   {
     keyType: "user_id",
     useCase: "GetMutableUser",
-    key: (userId) => userId,
+    cacheKey: (userId) => userId,
     trackForInvalidation: true,
     // Strongly invalidated mutable data should usually disable local cache.
     defaultConfig: new GCacheKeyConfig({
@@ -143,20 +143,23 @@ const gcache = new GCache({
 });
 ```
 
-`ramp` values are percentages from 0 to 100. `0` disables the layer, `100` enables it, and intermediate values use `rampSampler`; the default sampler is random. Provider errors fail open and execute the fallback function.
+`ramp` values are percentages from 0 to 100. `0` disables the layer, `100` enables it, and intermediate values use `rampSampler`; the default sampler is deterministic by cache key and layer, so the same key is consistently sampled in or out of a partial rollout. Provider errors fail open and execute the fallback function.
 
 ## Single-flight coalescing
 
 When caching is enabled, concurrent misses for the same key are coalesced. The first caller (the leader) runs the whole read-through chain and the fallback; every other caller for that key awaits the same in-flight result instead of running its own fallback. This protects the source of truth from a thundering herd on hot keys.
 
 ```ts
-const getUser = gcache.cached({
-  keyType: "user_id",
-  useCase: "GetUser",
-  id: ([userId]: [string]) => userId,
-  defaultConfig: GCacheKeyConfig.enabled(60),
-  coalesce: true, // default; set false to opt a use case out
-})(async (userId: string) => db.fetchUser(userId));
+const getUser = gcache.cached(
+  (userId: string) => db.fetchUser(userId),
+  {
+    keyType: "user_id",
+    useCase: "GetUser",
+    cacheKey: (userId) => userId,
+    defaultConfig: GCacheKeyConfig.enabled(60),
+    coalesce: true, // default; set false to opt a use case out
+  },
+);
 ```
 
 - **Scope** — in-process only. Across a fleet you get at most one fallback per instance per key while a value is being computed; once any instance populates Redis the rest get remote hits. Cross-process coalescing (a distributed lock) is not provided.
@@ -192,7 +195,7 @@ await gcache.enable(async () => {
 
 ## Keys, ids, and extra dimensions
 
-`cached(fn, options)` wraps a function; the wrapped callable has the same parameters and always returns a `Promise`. The cache key comes from a required `key` selector whose parameters are inferred from `fn`. Return a bare id, or return `{ id, args }` to extract a field or add secondary dimensions:
+`cached(fn, options)` wraps a function; the wrapped callable has the same parameters and always returns a `Promise`. The cache key comes from a required `cacheKey` selector whose parameters are inferred from `fn`. Return a bare id, or return `{ id, args }` to extract a field or add secondary dimensions:
 
 ```ts
 const searchPosts = gcache.cached(
@@ -200,7 +203,7 @@ const searchPosts = gcache.cached(
   {
     keyType: "user_id",
     useCase: "SearchPosts",
-    key: (userId, page, filter) => ({ id: userId, args: { page, filter } }),
+    cacheKey: (userId, page, filter) => ({ id: userId, args: { page, filter } }),
     defaultConfig: GCacheKeyConfig.enabled(60),
   },
 );
@@ -209,7 +212,7 @@ await gcache.enable(() => searchPosts("u1", 2, "active"));
 
 - **`keyType` + `id` is the invalidation unit.** `gcache.invalidate("user_id", "123")` busts **every** entry for that user, across all `args` variants. `useCase` identifies the individual cache (it's the metrics label and part of the stored key); caches sharing a `keyType` are invalidated together.
 - **`args` are part of the cache key** — different `args` produce different entries — but invalidation is by `id` only.
-- **Non-key inputs** (a db handle, an `AbortSignal`) are simply parameters the `key` selector ignores; they still reach `fn`.
+- **Non-key inputs** (a db handle, an `AbortSignal`) are simply parameters the `cacheKey` selector ignores; they still reach `fn`.
 - **Methods:** pass `obj.method.bind(obj)` (or `(...a) => obj.method(...a)`) — a bare `obj.method` reference loses `this`.
 
 ## Metrics
@@ -222,7 +225,7 @@ GCache registers Prometheus metrics by default via `prom-client`. Metric names i
 | `gcache_miss_counter` | Counter | `use_case`, `key_type`, `layer` | Cache misses |
 | `gcache_disabled_counter` | Counter | `use_case`, `key_type`, `layer`, `reason` | Cache skips (`context`, `missing_config`, `invalid_ttl`, `ramped_down`, `config_error`) |
 | `gcache_error_counter` | Counter | `use_case`, `key_type`, `layer`, `error`, `in_fallback` | Cache/fallback errors, with `in_fallback` separating cache plumbing failures from application fallback failures |
-| `gcache_invalidation_counter` | Counter | `key_type`, `layer` | Delete/invalidation calls for the layers touched today |
+| `gcache_invalidation_counter` | Counter | `key_type`, `layer` | Invalidation calls for the layers touched today |
 | `gcache_get_timer` | Histogram | `use_case`, `key_type`, `layer` | Cache get latency in seconds |
 | `gcache_fallback_timer` | Histogram | `use_case`, `key_type`, `layer` | Time spent in the underlying function |
 | `gcache_serialization_timer` | Histogram | `use_case`, `key_type`, `layer`, `operation` | Redis serializer dump/load latency |
@@ -258,11 +261,11 @@ Included:
 - Timestamped, versioned Redis envelope
 - JSON and custom serializer support for Redis values
 - Duplicate and reserved use-case validation
-- `delete` and `flushAll` across configured layers
+- `invalidate` and `flushAll` across configured layers
 - Fail-open behavior for key/config/cache read-write errors; maintenance mutations surface failures
 - Runtime config provider with fallback to cached-function `defaultConfig`
 - Per-layer TTL and ramp controls
-- Injectable ramp sampler for deterministic rollout tests
+- Deterministic default ramp sampler with injectable override hooks
 - Missing config disables only the relevant layer and falls through
 - Prometheus metrics with duplicate-registration safety
 - Custom metrics adapter/registry/prefix hooks

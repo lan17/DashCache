@@ -1,6 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { CacheLayer, GCache, GCacheKeyConfig, type RedisCommandClient, type RedisStoredValue } from "../src/index.js";
+import {
+  CacheLayer,
+  GCache,
+  GCacheKey,
+  GCacheKeyConfig,
+  deterministicRampSampler,
+  type RedisCommandClient,
+  type RedisStoredValue,
+} from "../src/index.js";
 
 class FakeRedis implements RedisCommandClient {
   readonly values = new Map<string, RedisStoredValue>();
@@ -26,6 +34,24 @@ const configFor = (ttlSec: Partial<Record<CacheLayer, number>>, ramp: Partial<Re
   new GCacheKeyConfig({ ttlSec, ramp });
 
 describe("GCache runtime config and ramp controls", () => {
+  it("uses a deterministic default ramp sample per cache key and layer", async () => {
+    // Given the built-in sampler is asked to sample the same key multiple times.
+    const key = new GCacheKey({ keyType: "user_id", id: "123", useCase: "DeterministicRampSample" });
+
+    // When the key is sampled repeatedly for a partial rollout.
+    const first = await deterministicRampSampler({ key, layer: CacheLayer.LOCAL, ramp: 50 });
+    const second = await deterministicRampSampler({ key, layer: CacheLayer.LOCAL, ramp: 50 });
+    const remote = await deterministicRampSampler({ key, layer: CacheLayer.REMOTE, ramp: 50 });
+
+    // Then the sample is stable, bounded, and layer-specific.
+    expect(first).toBe(second);
+    expect(first).toBeGreaterThanOrEqual(0);
+    expect(first).toBeLessThan(100);
+    expect(remote).toBeGreaterThanOrEqual(0);
+    expect(remote).toBeLessThan(100);
+    expect(remote).not.toBe(first);
+  });
+
   it("falls back to decorator defaultConfig when the provider returns null", async () => {
     // Given a runtime config provider that has no dynamic config for this key.
     const cacheConfigProvider = vi.fn(async () => null);
@@ -34,7 +60,7 @@ describe("GCache runtime config and ramp controls", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "ProviderFallbackDefaultConfig",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
     });
 
@@ -57,7 +83,7 @@ describe("GCache runtime config and ramp controls", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "DynamicProviderConfig",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
     });
 
@@ -82,14 +108,14 @@ describe("GCache runtime config and ramp controls", () => {
     const disabled = gcache.cached(async (userId: string) => ({ userId, calls: ++disabledCalls }), {
       keyType: "user_id",
       useCase: "LocalRampZero",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
       defaultConfig: configFor({ [CacheLayer.LOCAL]: 60 }, { [CacheLayer.LOCAL]: 0 }),
     });
     let enabledCalls = 0;
     const enabled = gcache.cached(async (userId: string) => ({ userId, calls: ++enabledCalls }), {
       keyType: "user_id",
       useCase: "LocalRampHundred",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
       defaultConfig: configFor({ [CacheLayer.LOCAL]: 60 }, { [CacheLayer.LOCAL]: 100 }),
     });
 
@@ -117,14 +143,14 @@ describe("GCache runtime config and ramp controls", () => {
     const passing = passingCache.cached(async (userId: string) => ({ userId, calls: ++passingCalls }), {
       keyType: "user_id",
       useCase: "LocalRampFiftyPassing",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
       defaultConfig: configFor({ [CacheLayer.LOCAL]: 60 }, { [CacheLayer.LOCAL]: 50 }),
     });
     let blockedCalls = 0;
     const blocked = blockedCache.cached(async (userId: string) => ({ userId, calls: ++blockedCalls }), {
       keyType: "user_id",
       useCase: "LocalRampFiftyBlocked",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
       defaultConfig: configFor({ [CacheLayer.LOCAL]: 60 }, { [CacheLayer.LOCAL]: 50 }),
     });
 
@@ -163,13 +189,13 @@ describe("GCache runtime config and ramp controls", () => {
     const passing = passingCache.cached(async (userId: string) => ({ userId, calls: ++passingCalls }), {
       keyType: "user_id",
       useCase: "RemoteRampFiftyPassing",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
     });
     let blockedCalls = 0;
     const blocked = blockedCache.cached(async (userId: string) => ({ userId, calls: ++blockedCalls }), {
       keyType: "user_id",
       useCase: "RemoteRampFiftyBlocked",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
     });
 
     // When both remote-only caches read the same key twice.
@@ -201,21 +227,21 @@ describe("GCache runtime config and ramp controls", () => {
     const negativeRamp = clampedCache.cached(async (userId: string) => ({ userId, calls: ++negativeCalls }), {
       keyType: "user_id",
       useCase: "NegativeConfiguredRamp",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
       defaultConfig: configFor({ [CacheLayer.LOCAL]: 60 }, { [CacheLayer.LOCAL]: -10 }),
     });
     let overHundredCalls = 0;
     const overHundredRamp = clampedCache.cached(async (userId: string) => ({ userId, calls: ++overHundredCalls }), {
       keyType: "user_id",
       useCase: "OverHundredConfiguredRamp",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
       defaultConfig: configFor({ [CacheLayer.LOCAL]: 60 }, { [CacheLayer.LOCAL]: 150 }),
     });
     let nanConfiguredCalls = 0;
     const nanConfiguredRamp = clampedCache.cached(async (userId: string) => ({ userId, calls: ++nanConfiguredCalls }), {
       keyType: "user_id",
       useCase: "NanConfiguredRamp",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
       defaultConfig: configFor({ [CacheLayer.LOCAL]: 60 }, { [CacheLayer.LOCAL]: Number.NaN }),
     });
 
@@ -247,7 +273,7 @@ describe("GCache runtime config and ramp controls", () => {
       const getUser = sampledCache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
         keyType: "user_id",
         useCase,
-        key: (userId) => userId,
+        cacheKey: (userId) => userId,
         defaultConfig: configFor({ [CacheLayer.LOCAL]: 60 }, { [CacheLayer.LOCAL]: 50 }),
       });
 
@@ -268,7 +294,7 @@ describe("GCache runtime config and ramp controls", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "LocalRampSingleSample",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
       defaultConfig: configFor({ [CacheLayer.LOCAL]: 60 }, { [CacheLayer.LOCAL]: 50 }),
     });
 
@@ -302,7 +328,7 @@ describe("GCache runtime config and ramp controls", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "RemoteRampSingleSample",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
     });
 
     // When the Redis key misses once.
@@ -335,7 +361,7 @@ describe("GCache runtime config and ramp controls", () => {
       const getUser = gcache.cached(async (userId: string) => ({ userId, ttl: String(ttl), calls: ++calls }), {
         keyType: "user_id",
         useCase: `InvalidTtl${String(ttl)}`,
-        key: (userId) => userId,
+        cacheKey: (userId) => userId,
         defaultConfig: configFor({ [CacheLayer.LOCAL]: ttl, [CacheLayer.REMOTE]: ttl }, { [CacheLayer.LOCAL]: 100, [CacheLayer.REMOTE]: 100 }),
       });
 
@@ -362,7 +388,7 @@ describe("GCache runtime config and ramp controls", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "RemoteOnlyRuntimeConfig",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
     });
 
     // When the same key is read twice through a Redis-backed cache.
@@ -388,7 +414,7 @@ describe("GCache runtime config and ramp controls", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "LocalOnlyRuntimeConfig",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
     });
 
     // When the same key is read twice through a Redis-backed cache.
@@ -417,7 +443,7 @@ describe("GCache runtime config and ramp controls", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "ConfigProviderThrows",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
     });
 

@@ -49,7 +49,7 @@ export function normalizeArgs(args: Record<string, string | number | boolean | b
   return Object.entries(args)
     .filter(([, value]) => value !== undefined)
     .map(([name, value]) => [name, String(value)] as [string, string])
-    .sort(([left], [right]) => left.localeCompare(right));
+    .sort(([left], [right]) => compareCodePoints(left, right));
 }
 
 export function invalidationPrefix(urnPrefix: string, keyType: string, id: string): string {
@@ -76,4 +76,8 @@ function joinUrnComponents(...components: readonly string[]): string {
 
 function encodeComponent(value: string): string {
   return encodeURIComponent(value);
+}
+
+function compareCodePoints(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }

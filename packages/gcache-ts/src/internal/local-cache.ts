@@ -69,11 +69,6 @@ export class LocalCache {
     this.evictOldestIfNeeded(cache);
   }
 
-  async delete(key: GCacheKey): Promise<boolean> {
-    const cache = this.caches.get(key.useCase);
-    return cache?.delete(key.urn) ?? false;
-  }
-
   async flushAll(): Promise<void> {
     this.caches.clear();
   }

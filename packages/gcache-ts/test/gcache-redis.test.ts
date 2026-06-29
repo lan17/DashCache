@@ -19,7 +19,6 @@ class FakeRedis implements RedisCommandClient {
   flushAllCalls = 0;
   failGet = false;
   failSet = false;
-  failDel = false;
   failFlushAll = false;
 
   async get(key: string): Promise<RedisStoredValue | null> {
@@ -49,9 +48,6 @@ class FakeRedis implements RedisCommandClient {
 
   async del(key: string): Promise<number> {
     this.delCalls += 1;
-    if (this.failDel) {
-      throw new Error("redis del failed");
-    }
     return this.values.delete(key) ? 1 : 0;
   }
 
@@ -87,7 +83,7 @@ describe("GCache Redis TTL layer", () => {
     const writeUser = writer.cached(async (userId: string) => ({ userId, calls: ++writerCalls }), {
       keyType: "user_id",
       useCase: "RedisLocalPopulate",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
     });
     await writer.enable(async () => await writeUser("123"));
@@ -97,7 +93,7 @@ describe("GCache Redis TTL layer", () => {
     const readUser = reader.cached(async (userId: string) => ({ userId, calls: ++readerCalls }), {
       keyType: "user_id",
       useCase: "RedisLocalPopulate",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
     });
     redis.getCalls = 0;
@@ -121,7 +117,7 @@ describe("GCache Redis TTL layer", () => {
     const writeUser = writer.cached(async (userId: string) => ({ userId, source: "redis" }), {
       keyType: "user_id",
       useCase: "RedisNoDisabledLocalPopulate",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
     });
     await writer.enable(async () => await writeUser("123"));
@@ -139,7 +135,7 @@ describe("GCache Redis TTL layer", () => {
     const readUser = reader.cached(async (userId: string) => ({ userId, source: `fallback-${++readerCalls}` }), {
       keyType: "user_id",
       useCase: "RedisNoDisabledLocalPopulate",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
     });
     redis.getCalls = 0;
 
@@ -165,7 +161,7 @@ describe("GCache Redis TTL layer", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "RedisEnvelopeWrite",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
       defaultConfig: GCacheKeyConfig.enabled(30),
     });
 
@@ -206,7 +202,7 @@ describe("GCache Redis TTL layer", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "RedisClientFactoryRetry",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
     });
 
@@ -237,7 +233,7 @@ describe("GCache Redis TTL layer", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "RedisClientFactory",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
     });
 
@@ -263,7 +259,7 @@ describe("GCache Redis TTL layer", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "RedisFailOpen",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
       defaultConfig: new GCacheKeyConfig({
         ttlSec: { [CacheLayer.LOCAL]: 0, [CacheLayer.REMOTE]: 60 },
         ramp: { [CacheLayer.LOCAL]: 100, [CacheLayer.REMOTE]: 100 },
@@ -295,7 +291,7 @@ describe("GCache Redis TTL layer", () => {
     const readFromWriter = writer.cached(async (userId: string) => ({ id: userId, source: "fallback" }), {
       keyType: "user_id",
       useCase: "RedisCustomSerializer",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
       serializer,
     });
@@ -306,7 +302,7 @@ describe("GCache Redis TTL layer", () => {
     const readFromRedis = reader.cached(async (userId: string) => ({ id: userId, source: `fallback-${++readerCalls}` }), {
       keyType: "user_id",
       useCase: "RedisCustomSerializer",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
       serializer,
     });
@@ -338,7 +334,7 @@ describe("GCache Redis TTL layer", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "RedisSerializerDumpFailure",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
       serializer,
     });
@@ -385,7 +381,7 @@ describe("GCache Redis TTL layer", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, source: `fallback-${++calls}` }), {
       keyType: "user_id",
       useCase: "RedisSerializerLoadFailure",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
       defaultConfig: new GCacheKeyConfig({
         ttlSec: { [CacheLayer.LOCAL]: 0, [CacheLayer.REMOTE]: 60 },
         ramp: { [CacheLayer.LOCAL]: 100, [CacheLayer.REMOTE]: 100 },
@@ -436,7 +432,7 @@ describe("GCache Redis TTL layer", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "RedisBadEnvelope",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
     });
 
@@ -458,7 +454,6 @@ describe("GCache Redis TTL layer", () => {
   it("falls through when remote config is missing and propagates Redis maintenance errors", async () => {
     // Given Redis is configured but the key has no remote TTL and maintenance commands fail.
     const redis = new FakeRedis();
-    redis.failDel = true;
     redis.failFlushAll = true;
     const logger = { debug: vi.fn(), warn: vi.fn(), error: vi.fn() };
     const metrics = {
@@ -477,31 +472,22 @@ describe("GCache Redis TTL layer", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "RedisMissingRemoteTtl",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
       defaultConfig: new GCacheKeyConfig({
         ttlSec: { [CacheLayer.LOCAL]: 0 },
         ramp: { [CacheLayer.LOCAL]: 100 },
       }),
     });
 
-    // When cache reads/writes and explicit maintenance operations cannot use Redis safely.
+    // When cache reads/writes and explicit maintenance cannot use Redis safely.
     const value = await gcache.enable(async () => await getUser("123"));
-    await expect(gcache.delete(keyFor("123", "RedisMissingRemoteTtl"))).rejects.toThrow("redis del failed");
     await expect(gcache.flushAll()).rejects.toThrow("redis flushAll failed");
 
-    // Then missing remote config disables Redis reads/writes, while maintenance failures are logged and surfaced.
+    // Then missing remote config disables Redis reads/writes, while flush failures are logged and surfaced.
     expect(value).toEqual({ userId: "123", calls: 1 });
     expect(redis.getCalls).toBe(0);
     expect(redis.setCalls).toBe(0);
-    expect(logger.warn).toHaveBeenCalledWith("Error deleting value from Redis cache", expect.any(Error));
     expect(logger.warn).toHaveBeenCalledWith("Error flushing Redis cache", expect.any(Error));
-    expect(metrics.error).toHaveBeenCalledWith({
-      useCase: "RedisMissingRemoteTtl",
-      keyType: "user_id",
-      layer: CacheLayer.REMOTE,
-      error: "Error",
-      inFallback: false,
-    });
     expect(metrics.error).toHaveBeenCalledWith({
       useCase: "flushAll",
       keyType: "all",
@@ -549,7 +535,7 @@ describe("GCache Redis TTL layer", () => {
       const getValue = gcache.cached(async (userId: string) => ({ userId }), {
         keyType: "user_id",
         useCase,
-        key: (userId) => userId,
+        cacheKey: (userId) => userId,
         defaultConfig: GCacheKeyConfig.enabled(60),
       });
       await gcache.enable(async () => await getValue("123"));
@@ -577,7 +563,7 @@ describe("GCache Redis TTL layer", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId }), {
       keyType: "user_id",
       useCase: "RedisMissingFlushCommand",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
       defaultConfig: new GCacheKeyConfig({
         ttlSec: { [CacheLayer.LOCAL]: 0, [CacheLayer.REMOTE]: 60 },
         ramp: { [CacheLayer.LOCAL]: 100, [CacheLayer.REMOTE]: 100 },
@@ -601,15 +587,15 @@ describe("GCache Redis TTL layer", () => {
     expect(construct).toThrow("Redis config requires either client or createClient");
   });
 
-  it("deletes and flushes entries across local and Redis layers", async () => {
+  it("flushes entries across local and Redis layers", async () => {
     // Given two cached values exist in both local and Redis layers.
     const redis = new FakeRedis();
     const gcache = new GCache({ redis: { client: redis } });
     let calls = 0;
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
-      useCase: "RedisDeleteAndFlush",
-      key: (userId) => userId,
+      useCase: "RedisFlushAll",
+      cacheKey: (userId) => userId,
       defaultConfig: GCacheKeyConfig.enabled(60),
     });
     await gcache.enable(async () => {
@@ -617,23 +603,15 @@ describe("GCache Redis TTL layer", () => {
       await getUser("456");
     });
 
-    // When one key is deleted and then all cache layers are flushed.
-    const deleted = await gcache.delete(keyFor("123", "RedisDeleteAndFlush"));
-    const afterDelete = await gcache.enable(async () => [await getUser("123"), await getUser("456")]);
+    // When all cache layers are flushed.
     await gcache.flushAll();
     const afterFlush = await gcache.enable(async () => [await getUser("123"), await getUser("456")]);
 
-    // Then delete reaches both layers and flushAll clears both layers.
-    expect(deleted).toBe(true);
-    expect(afterDelete).toEqual([
-      { userId: "123", calls: 3 },
-      { userId: "456", calls: 2 },
-    ]);
+    // Then flushAll clears both layers.
     expect(afterFlush).toEqual([
-      { userId: "123", calls: 4 },
-      { userId: "456", calls: 5 },
+      { userId: "123", calls: 3 },
+      { userId: "456", calls: 4 },
     ]);
-    expect(redis.delCalls).toBeGreaterThanOrEqual(1);
     expect(redis.flushAllCalls).toBe(1);
   });
 });

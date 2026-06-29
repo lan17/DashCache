@@ -152,11 +152,6 @@ export class RedisCache {
     return true;
   }
 
-  async delete(key: GCacheKey): Promise<boolean> {
-    const client = await this.resolveClient();
-    return (await client.del(this.redisKey(key))) > 0;
-  }
-
   async invalidate(keyType: string, id: string, futureBufferMs = 0, urnPrefix = "urn"): Promise<void> {
     const client = await this.resolveClient();
     const watermarkMs = Date.now() + futureBufferMs;

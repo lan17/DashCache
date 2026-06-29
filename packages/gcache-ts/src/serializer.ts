@@ -1,6 +1,8 @@
+import type { Awaitable } from "./config.js";
+
 export interface Serializer<T = unknown> {
-  dump(value: T): Promise<string | Buffer>;
-  load(value: string | Buffer): Promise<T>;
+  dump(value: T): Awaitable<string | Buffer>;
+  load(value: string | Buffer): Awaitable<T>;
 }
 
 const JSON_UNDEFINED_SENTINEL = "__gcache_json_undefined_v1__";

@@ -1,4 +1,4 @@
-export { CacheLayer, DEFAULT_WATERMARK_TTL_SEC, GCacheKeyConfig, randomRampSampler } from "./config.js";
+export { CacheLayer, DEFAULT_WATERMARK_TTL_SEC, GCacheKeyConfig, deterministicRampSampler, randomRampSampler } from "./config.js";
 export type { CacheConfigProvider, CacheRampSample, CacheRampSampler, GCacheConfig, LayerConfig, Logger } from "./config.js";
 export { GCacheContext } from "./context.js";
 export { PrometheusGCacheMetrics, createPrometheusGCacheMetrics } from "./metrics.js";

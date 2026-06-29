@@ -162,7 +162,7 @@ describe("GCache targeted invalidation watermarks", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "TrackedAtomicRead",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
       trackForInvalidation: true,
       defaultConfig: remoteOnly(),
     });
@@ -314,14 +314,14 @@ describe("GCache targeted invalidation watermarks", () => {
     const getProfile = gcache.cached(async (userId: string) => ({ userId, profileVersion }), {
       keyType: "user_id",
       useCase: "InvalidateProfile",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
       trackForInvalidation: true,
       defaultConfig: remoteOnly(),
     });
     const getPermissions = gcache.cached(async (userId: string) => ({ userId, permissionsVersion }), {
       keyType: "user_id",
       useCase: "InvalidatePermissions",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
       trackForInvalidation: true,
       defaultConfig: remoteOnly(),
     });
@@ -358,7 +358,7 @@ describe("GCache targeted invalidation watermarks", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "FutureBufferUser",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
       trackForInvalidation: true,
       defaultConfig: localAndRemote(),
     });
@@ -373,6 +373,20 @@ describe("GCache targeted invalidation watermarks", () => {
     expect(first).toEqual({ userId: "123", calls: 1 });
     expect(second).toEqual({ userId: "123", calls: 2 });
     expect([...redis.values.keys()]).toEqual([watermarkKey]);
+  });
+
+  it("rejects invalid future invalidation buffers before writing Redis", async () => {
+    // Given future invalidation buffers must represent finite nonnegative milliseconds.
+    const redis = new FakeRedis();
+    const gcache = new GCache({ redis: { client: redis } });
+
+    // When invalid buffers are passed.
+    await expect(gcache.invalidate("user_id", "123", -1)).rejects.toThrow("futureBufferMs");
+    await expect(gcache.invalidate("user_id", "123", Number.NaN)).rejects.toThrow("futureBufferMs");
+    await expect(gcache.invalidate("user_id", "123", Number.POSITIVE_INFINITY)).rejects.toThrow("futureBufferMs");
+
+    // Then no watermark write reaches Redis.
+    expect(redis.setCalls).toBe(0);
   });
 
   it("does not write Redis or local cache when a future invalidation arrives during fallback", async () => {
@@ -391,7 +405,7 @@ describe("GCache targeted invalidation watermarks", () => {
       {
         keyType: "user_id",
         useCase: "FutureBufferFallbackRace",
-        key: (userId) => userId,
+        cacheKey: (userId) => userId,
         trackForInvalidation: true,
         defaultConfig: localAndRemote(),
       },
@@ -418,7 +432,7 @@ describe("GCache targeted invalidation watermarks", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "TrackedMalformedEnvelope",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
       trackForInvalidation: true,
       defaultConfig: localAndRemote(),
     });
@@ -460,7 +474,7 @@ describe("GCache targeted invalidation watermarks", () => {
     const getUser = gcache.cached(async (userId: string, locale: string) => ({ userId, locale }), {
       keyType: "User",
       useCase: "ClusterSlotUser",
-      key: (userId, locale) => ({ id: userId, args: { locale } }),
+      cacheKey: (userId, locale) => ({ id: userId, args: { locale } }),
       trackForInvalidation: true,
       defaultConfig: remoteOnly(),
     });
@@ -490,7 +504,7 @@ describe("GCache targeted invalidation watermarks", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, version }), {
       keyType: "user_id",
       useCase: "LocalInvalidationLimit",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
       trackForInvalidation: true,
       defaultConfig: localAndRemote(),
     });
@@ -534,7 +548,7 @@ describe("GCache targeted invalidation watermarks", () => {
     const getUser = readGCache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "WatermarkReadFailOpen",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
       trackForInvalidation: true,
       defaultConfig: localAndRemote(),
     });
@@ -564,7 +578,7 @@ describe("GCache targeted invalidation watermarks", () => {
     const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
       useCase: "MalformedWatermarkFailOpen",
-      key: (userId) => userId,
+      cacheKey: (userId) => userId,
       trackForInvalidation: true,
       defaultConfig: localAndRemote(),
     });
@@ -582,48 +596,5 @@ describe("GCache targeted invalidation watermarks", () => {
       name: "error",
       labels: { useCase: "MalformedWatermarkFailOpen", keyType: "user_id", layer: CacheLayer.REMOTE, error: "Error", inFallback: false },
     });
-  });
-});
-
-describe("CachedFn delete handle sugar", () => {
-  it("delete(id) acts on the handle's keyType", async () => {
-    const redis = new FakeRedis();
-    const gcache = new GCache({ redis: { client: redis } });
-    let calls = 0;
-    const getUser = gcache.cached(
-      async (id: string) => ({ id, calls: ++calls }),
-      {
-        keyType: "user_id",
-        useCase: "HandleSugar",
-        key: (id) => id,
-        trackForInvalidation: true,
-        defaultConfig: new GCacheKeyConfig({ ttlSec: { [CacheLayer.REMOTE]: 300 }, ramp: { [CacheLayer.REMOTE]: 100 } }),
-      },
-    );
-
-    // Populate, then confirm a cached hit does not re-run the loader.
-    expect(await gcache.enable(() => getUser("123"))).toEqual({ id: "123", calls: 1 });
-    expect(await gcache.enable(() => getUser("123"))).toEqual({ id: "123", calls: 1 });
-
-    // Class-level invalidation writes the watermark for user_id:123, so the next read re-runs the loader.
-    await gcache.invalidate("user_id", "123");
-    expect(await gcache.enable(() => getUser("123"))).toEqual({ id: "123", calls: 2 });
-
-    // handle.delete(id) removes the entry, so the next read re-runs the loader again.
-    await getUser.delete("123");
-    expect(await gcache.enable(() => getUser("123"))).toEqual({ id: "123", calls: 3 });
-  });
-
-  it("delete(id) reports key construction failures as promise rejections", async () => {
-    const gcache = new GCache();
-    const getUser = gcache.cached(async (id: string) => id, {
-      keyType: "user_id",
-      useCase: "HandleDeleteKeyConstructionFailure",
-      key: (id) => id,
-      trackForInvalidation: true,
-      defaultConfig: GCacheKeyConfig.enabled(60),
-    });
-
-    await expect(getUser.delete("bad{id")).rejects.toThrow("Redis Cluster hash tag components must not contain braces");
   });
 });

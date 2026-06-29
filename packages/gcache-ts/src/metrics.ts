@@ -102,7 +102,7 @@ export class PrometheusGCacheMetrics implements GCacheMetricsAdapter {
     });
     this.invalidationCounter = counter(registry, {
       name: `${prefix}gcache_invalidation_counter`,
-      help: "GCache invalidation/delete calls by key type and layer.",
+      help: "GCache invalidation calls by key type and layer.",
       labelNames: ["key_type", "layer"] as const,
     });
     this.coalescedCounter = counter(registry, {

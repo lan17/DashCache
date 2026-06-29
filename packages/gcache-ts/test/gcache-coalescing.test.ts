@@ -75,7 +75,7 @@ describe("GCache single-flight coalescing", () => {
       {
         keyType: "user_id",
         useCase: "Coalesce_ConcurrentMisses",
-        key: (id) => id,
+        cacheKey: (id) => id,
         defaultConfig: GCacheKeyConfig.enabled(60),
       },
     );
@@ -109,7 +109,7 @@ describe("GCache single-flight coalescing", () => {
       {
         keyType: "user_id",
         useCase: "Coalesce_RedisChain",
-        key: (id) => id,
+        cacheKey: (id) => id,
         defaultConfig: remoteOnly,
       },
     );
@@ -142,7 +142,7 @@ describe("GCache single-flight coalescing", () => {
       {
         keyType: "user_id",
         useCase: "Coalesce_LeaderRejects",
-        key: (id) => id,
+        cacheKey: (id) => id,
         defaultConfig: GCacheKeyConfig.enabled(60),
       },
     );
@@ -178,7 +178,7 @@ describe("GCache single-flight coalescing", () => {
       {
         keyType: "user_id",
         useCase: "Coalesce_DistinctKeys",
-        key: (id) => id,
+        cacheKey: (id) => id,
         defaultConfig: GCacheKeyConfig.enabled(60),
       },
     );
@@ -208,7 +208,7 @@ describe("GCache single-flight coalescing", () => {
       {
         keyType: "user_id",
         useCase: "Coalesce_FreshAfterSettle",
-        key: (id) => id,
+        cacheKey: (id) => id,
         defaultConfig: disabledLayers,
       },
     );
@@ -243,7 +243,7 @@ describe("GCache single-flight coalescing", () => {
       {
         keyType: "user_id",
         useCase: "Coalesce_DisabledStatic",
-        key: (id) => id,
+        cacheKey: (id) => id,
         coalesce: false,
         defaultConfig: GCacheKeyConfig.enabled(60),
       },
@@ -276,7 +276,7 @@ describe("GCache single-flight coalescing", () => {
       {
         keyType: "user_id",
         useCase: "Coalesce_RuntimeKillSwitch",
-        key: (id) => id,
+        cacheKey: (id) => id,
         coalesce: true,
         defaultConfig: GCacheKeyConfig.enabled(60),
       },
@@ -306,7 +306,7 @@ describe("GCache single-flight coalescing", () => {
       {
         keyType: "user_id",
         useCase: "Coalesce_Metrics",
-        key: (id) => id,
+        cacheKey: (id) => id,
         defaultConfig: GCacheKeyConfig.enabled(60),
       },
     );
@@ -344,7 +344,7 @@ describe("GCache single-flight coalescing", () => {
       {
         keyType: "user_id",
         useCase: "Coalesce_RedisWriteError",
-        key: (id) => id,
+        cacheKey: (id) => id,
         defaultConfig: GCacheKeyConfig.enabled(60),
       },
     );
@@ -373,7 +373,7 @@ describe("GCache single-flight coalescing", () => {
       {
         keyType: "user_id",
         useCase: "Coalesce_DisabledContext",
-        key: (id) => id,
+        cacheKey: (id) => id,
         defaultConfig: GCacheKeyConfig.enabled(60),
       },
     );
