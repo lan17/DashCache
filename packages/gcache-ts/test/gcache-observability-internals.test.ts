@@ -94,19 +94,19 @@ describe("GCache observability internal compatibility paths", () => {
 
     // When runtime config is resolved through compatibility and sampled disabled paths.
     const noConfig = await resolveLayerConfig({
-      configProvider: async () => null,
+      config: null,
       key: key(null),
       layer: CacheLayer.LOCAL,
       rampSampler: vi.fn(),
     });
     const noRamp = await resolveLayerConfig({
-      configProvider: async () => missingRamp,
+      config: missingRamp,
       key: key(),
       layer: CacheLayer.LOCAL,
       rampSampler: vi.fn(),
     });
     const nonFiniteSample = await resolveLayerConfig({
-      configProvider: async () => partialRamp,
+      config: partialRamp,
       key: key(),
       layer: CacheLayer.LOCAL,
       rampSampler: () => Number.NaN,

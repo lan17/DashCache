@@ -1,6 +1,6 @@
 # @rungalileo/gcache
 
-TypeScript port of GCache. Milestone 5 ships explicit enabled contexts, stable key construction, local/Redis TTL caching, runtime config providers, gradual rollout ramp controls, Prometheus-ready observability, and Redis watermark-based targeted invalidation.
+TypeScript port of GCache. Milestone 5 ships explicit enabled contexts, stable key construction, local/Redis TTL caching, runtime config providers, gradual rollout ramp controls, single-flight request coalescing, Prometheus-ready observability, and Redis watermark-based targeted invalidation.
 
 > [!NOTE]
 > TypeScript support is experimental for now. This package is intended for early validation and feedback before treating the API and operational behavior as stable.
@@ -143,6 +143,29 @@ const gcache = new GCache({
 
 `ramp` values are percentages from 0 to 100. `0` disables the layer, `100` enables it, and intermediate values use `rampSampler`; the default sampler is random. Provider errors fail open and execute the fallback function.
 
+## Single-flight coalescing
+
+When caching is enabled, concurrent misses for the same key are coalesced. The first caller (the leader) runs the whole read-through chain and the fallback; every other caller for that key awaits the same in-flight result instead of running its own fallback. This protects the source of truth from a thundering herd on hot keys.
+
+```ts
+const getUser = gcache.cached({
+  keyType: "user_id",
+  useCase: "GetUser",
+  id: ([userId]: [string]) => userId,
+  defaultConfig: GCacheKeyConfig.enabled(60),
+  coalesce: true, // default; set false to opt a use case out
+})(async (userId: string) => db.fetchUser(userId));
+```
+
+- **Scope** — in-process only. Across a fleet you get at most one fallback per instance per key while a value is being computed; once any instance populates Redis the rest get remote hits. Cross-process coalescing (a distributed lock) is not provided.
+- **Default and opt-out** — on by default. Set `coalesce: false` on a cached function to opt it out, or change the instance default with `new GCache({ coalesceByDefault: false })`.
+- **Runtime control** — a `cacheConfigProvider` may set `coalesce` on the returned `GCacheKeyConfig` to flip it without a redeploy (a kill switch). Precedence is `runtime ?? perUseCase ?? coalesceByDefault`.
+- **Failure handling** — if the leader's fallback rejects, all waiters reject with the same error and the in-flight entry is cleared, so the next call retries.
+- **Observability** — each coalesced waiter increments `gcache_coalesced_counter` (labels `use_case`, `key_type`); the fallback timer still records once per leader.
+
+> [!WARNING]
+> Coalescing shares the leader's single result with every concurrent waiter, so only use it when the cache key fully determines the result. Set `coalesce: false` for fallbacks that are **side-effecting / non-idempotent** (each call must run) or whose result depends on **per-request context not captured by the key** (for example, the calling user's own permissions). Note that at `ramp: 0` concurrent calls are still deduped even though nothing is cached.
+
 ## Enabled context
 
 The TypeScript port uses Node `AsyncLocalStorage` to mirror Python's `with gcache.enable():` safety model.
@@ -241,6 +264,7 @@ Included:
 - Redis Cluster hash-tagged value/watermark keys for invalidation-tracked entries
 - Configurable Redis watermark TTL via `redis.watermarkTtlSec` with `DEFAULT_WATERMARK_TTL_SEC`
 - Future-buffer behavior that avoids cache writes during active invalidation windows
+- In-process single-flight coalescing with per-use-case opt-out, instance default, and runtime kill switch
 
 Not included yet:
 

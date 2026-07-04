@@ -425,9 +425,11 @@ describe("GCache runtime config and ramp controls", () => {
     const first = await gcache.enable(async () => await getUser("123"));
     const second = await gcache.enable(async () => await getUser("123"));
 
-    // Then no provider error escapes and no value is accidentally cached.
+    // Then no provider error escapes and no value is accidentally cached. The
+    // config is resolved once up front, so the failure is logged there rather
+    // than surfacing as a per-layer cache-read error.
     expect(first).toEqual({ userId: "123", calls: 1 });
     expect(second).toEqual({ userId: "123", calls: 2 });
-    expect(logger.error).toHaveBeenCalledWith("Error getting value from local cache", providerError);
+    expect(logger.warn).toHaveBeenCalledWith("Could not resolve GCache key config", providerError);
   });
 });

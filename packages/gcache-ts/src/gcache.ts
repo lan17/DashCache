@@ -1,6 +1,6 @@
 import { performance } from "node:perf_hooks";
 
-import { CacheLayer, GCacheConfig, randomRampSampler, type CacheConfigProvider, type CacheRampSampler, type InvalidateOptions, type Logger } from "./config.js";
+import { CacheLayer, GCacheConfig, GCacheKeyConfig, randomRampSampler, type CacheConfigProvider, type CacheRampSampler, type InvalidateOptions, type Logger } from "./config.js";
 import { GCacheContext } from "./context.js";
 import { UseCaseIsAlreadyRegisteredError, UseCaseNameIsReservedError } from "./errors.js";
 import { GCacheKey, normalizeArgs } from "./key.js";
@@ -8,6 +8,7 @@ import { createPrometheusGCacheMetrics, errorName, labelsFor, type CacheMetricLa
 import type { Serializer } from "./serializer.js";
 import { LocalCache } from "./internal/local-cache.js";
 import { RedisCache } from "./internal/redis-cache.js";
+import { fetchKeyConfig } from "./internal/runtime-config.js";
 
 type Awaitable<T> = T | Promise<T>;
 type CacheableArgs = readonly unknown[];
@@ -21,6 +22,9 @@ export interface CachedOptions<Args extends CacheableArgs> {
   readonly defaultConfig?: import("./config.js").GCacheKeyConfig | null;
   readonly serializer?: Serializer<unknown> | null;
   readonly trackForInvalidation?: boolean;
+  // Coalesce concurrent misses for this use case into one in-flight fallback.
+  // Defaults to the instance's coalesceByDefault (true); runtime config wins.
+  readonly coalesce?: boolean;
 }
 
 const DEFAULT_LOCAL_MAX_SIZE = 10_000;
@@ -37,12 +41,15 @@ export class GCache {
   private readonly rampSampler: CacheRampSampler;
   private readonly redisCache: RedisCache | null;
   private readonly metrics: GCacheMetricsAdapter | null;
+  private readonly coalesceByDefault: boolean;
+  private readonly inFlight = new Map<string, Promise<unknown>>();
 
   constructor(config: GCacheConfig = {}) {
     this.configProvider = config.cacheConfigProvider ?? defaultConfigProvider;
     this.urnPrefix = config.urnPrefix ?? "urn";
     this.logger = config.logger ?? defaultLogger;
     this.rampSampler = config.rampSampler ?? randomRampSampler;
+    this.coalesceByDefault = config.coalesceByDefault ?? true;
     const metrics =
       config.metrics === false
         ? null
@@ -116,11 +123,31 @@ export class GCache {
           return await this.callFallback({ useCase: options.useCase, keyType: options.keyType, layer: "noop" }, async () => await fn(...args));
         }
 
-        if (this.redisCache === null) {
-          return await this.getThroughLocalOnly(key, async () => await fn(...args));
+        let keyConfig: GCacheKeyConfig | null;
+        try {
+          keyConfig = await fetchKeyConfig(this.configProvider, key);
+        } catch (error) {
+          // Provider failure: fail open and run uncached, mirroring the per-layer config_error path.
+          this.logger.warn("Could not resolve GCache key config", error);
+          this.metrics?.disabled({
+            useCase: options.useCase,
+            keyType: options.keyType,
+            layer: "noop",
+            reason: "config_error",
+          });
+          return await this.callFallback({ useCase: options.useCase, keyType: options.keyType, layer: "noop" }, async () => await fn(...args));
         }
 
-        return await this.getThroughRedisChain(key, async () => await fn(...args));
+        const run = (): Promise<Value> =>
+          this.redisCache === null
+            ? this.getThroughLocalOnly(key, keyConfig, async () => await fn(...args))
+            : this.getThroughRedisChain(key, keyConfig, async () => await fn(...args));
+
+        if (keyConfig?.coalesce ?? options.coalesce ?? this.coalesceByDefault) {
+          return await this.singleFlight(key, run);
+        }
+
+        return await run();
       };
     };
   }
@@ -184,8 +211,8 @@ export class GCache {
     }
   }
 
-  private async getThroughLocalOnly<T>(key: GCacheKey, fallback: () => Promise<T>): Promise<T> {
-    const local = await this.readLocal<T>(key);
+  private async getThroughLocalOnly<T>(key: GCacheKey, keyConfig: GCacheKeyConfig | null, fallback: () => Promise<T>): Promise<T> {
+    const local = await this.readLocal<T>(key, keyConfig);
     if (local.status === "hit") {
       return local.value;
     }
@@ -197,13 +224,13 @@ export class GCache {
     return value;
   }
 
-  private async getThroughRedisChain<T>(key: GCacheKey, fallback: () => Promise<T>): Promise<T> {
-    const local = await this.readLocal<T>(key);
+  private async getThroughRedisChain<T>(key: GCacheKey, keyConfig: GCacheKeyConfig | null, fallback: () => Promise<T>): Promise<T> {
+    const local = await this.readLocal<T>(key, keyConfig);
     if (local.status === "hit") {
       return local.value;
     }
 
-    const remote = await this.readRemote<T>(key);
+    const remote = await this.readRemote<T>(key, keyConfig);
     if (remote.status === "hit") {
       if (local.status === "miss") {
         await this.putLocalFailOpen(key, remote.value, local.config);
@@ -232,10 +259,10 @@ export class GCache {
     return value;
   }
 
-  private async readLocal<T>(key: GCacheKey) {
+  private async readLocal<T>(key: GCacheKey, keyConfig: GCacheKeyConfig | null) {
     const start = performance.now();
     try {
-      const result = await this.localCache.getIfPresentResult<T>(key);
+      const result = await this.localCache.getIfPresentResult<T>(key, keyConfig);
       if (result.status === "disabled") {
         this.metrics?.disabled({ ...labelsFor(key, CacheLayer.LOCAL), reason: result.reason });
         return result;
@@ -255,10 +282,10 @@ export class GCache {
     }
   }
 
-  private async readRemote<T>(key: GCacheKey) {
+  private async readRemote<T>(key: GCacheKey, keyConfig: GCacheKeyConfig | null) {
     const start = performance.now();
     try {
-      const result = await this.redisCache?.getResult<T>(key);
+      const result = await this.redisCache?.getResult<T>(key, keyConfig);
       if (result === undefined) {
         return { status: "disabled", reason: "missing_config" } as const;
       }
@@ -327,6 +354,26 @@ export class GCache {
       trackForInvalidation: options.trackForInvalidation ?? false,
     });
   }
+
+  // In-process single-flight: the first caller for a urn runs the chain; concurrent
+  // callers share its in-flight promise. The entry is cleared on settle (success or
+  // reject) so a failed leader never poisons later callers.
+  private singleFlight<T>(key: GCacheKey, run: () => Promise<T>): Promise<T> {
+    const existing = this.inFlight.get(key.urn);
+    if (existing !== undefined) {
+      this.metrics?.coalesced?.({ useCase: key.useCase, keyType: key.keyType });
+      // Same urn implies the same logical value type as the leader.
+      return existing as Promise<T>;
+    }
+
+    const promise = run();
+    this.inFlight.set(key.urn, promise);
+    const clear = (): void => {
+      this.inFlight.delete(key.urn);
+    };
+    void promise.then(clear, clear);
+    return promise;
+  }
 }
 
 function elapsedSeconds(startMs: number): number {
@@ -344,6 +391,7 @@ function safeMetrics(metrics: GCacheMetricsAdapter | null): GCacheMetricsAdapter
     disabled: (labels) => callMetric(() => metrics.disabled(labels)),
     error: (labels) => callMetric(() => metrics.error(labels)),
     invalidation: (labels) => callMetric(() => metrics.invalidation(labels)),
+    coalesced: (labels) => callMetric(() => metrics.coalesced?.(labels)),
     observeGet: (labels, seconds) => callMetric(() => metrics.observeGet(labels, seconds)),
     observeFallback: (labels, seconds) => callMetric(() => metrics.observeFallback(labels, seconds)),
     observeSerialization: (labels, seconds) => callMetric(() => metrics.observeSerialization(labels, seconds)),

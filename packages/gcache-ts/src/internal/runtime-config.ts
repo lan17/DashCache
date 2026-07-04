@@ -1,4 +1,4 @@
-import { CacheLayer, type CacheConfigProvider, type CacheRampSampler } from "../config.js";
+import { CacheLayer, type CacheConfigProvider, type CacheRampSampler, type GCacheKeyConfig } from "../config.js";
 import type { GCacheKey } from "../key.js";
 import type { DisabledReason } from "../metrics.js";
 
@@ -12,10 +12,17 @@ export type LayerConfigResolution =
   | { readonly status: "disabled"; readonly reason: DisabledReason };
 
 interface ResolveLayerConfigOptions {
-  readonly configProvider: CacheConfigProvider;
+  readonly config: GCacheKeyConfig | null;
   readonly key: GCacheKey;
   readonly layer: CacheLayer;
   readonly rampSampler: CacheRampSampler;
+}
+
+export async function fetchKeyConfig(
+  configProvider: CacheConfigProvider,
+  key: GCacheKey,
+): Promise<GCacheKeyConfig | null> {
+  return (await configProvider(key)) ?? key.defaultConfig;
 }
 
 export async function resolveLayerConfig(options: ResolveLayerConfigOptions): Promise<ResolvedLayerConfig | null> {
@@ -24,7 +31,7 @@ export async function resolveLayerConfig(options: ResolveLayerConfigOptions): Pr
 }
 
 export async function resolveLayerConfigResult(options: ResolveLayerConfigOptions): Promise<LayerConfigResolution> {
-  const config = (await options.configProvider(options.key)) ?? options.key.defaultConfig;
+  const config = options.config;
   if (config === null) {
     return { status: "disabled", reason: "missing_config" };
   }

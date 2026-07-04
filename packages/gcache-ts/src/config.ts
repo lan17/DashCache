@@ -31,10 +31,15 @@ export const DEFAULT_WATERMARK_TTL_SEC = 3600 * 4;
 export class GCacheKeyConfig {
   readonly ttlSec: LayerConfig;
   readonly ramp: LayerConfig;
+  // Single-flight toggle for the whole read-through chain. Chain-level, not
+  // per-layer. When set here (via the runtime provider) it overrides the
+  // per-use-case `coalesce` option on the cached function.
+  readonly coalesce?: boolean | undefined;
 
-  constructor(config: { ttlSec: LayerConfig; ramp: LayerConfig }) {
+  constructor(config: { ttlSec: LayerConfig; ramp: LayerConfig; coalesce?: boolean }) {
     this.ttlSec = { ...config.ttlSec };
     this.ramp = { ...config.ramp };
+    this.coalesce = config.coalesce;
   }
 
   static enabled(ttlSec: number): GCacheKeyConfig {
@@ -71,4 +76,7 @@ export interface GCacheConfig {
   readonly metrics?: GCacheMetricsAdapter | false;
   readonly metricsPrefix?: string;
   readonly metricsRegistry?: Registry;
+  // Fleet-wide default for single-flight coalescing. Defaults to true; a
+  // per-use-case option or the runtime provider can override it.
+  readonly coalesceByDefault?: boolean;
 }

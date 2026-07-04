@@ -1,7 +1,7 @@
-import { CacheLayer, type CacheConfigProvider, type CacheRampSampler } from "../config.js";
+import { CacheLayer, type CacheConfigProvider, type CacheRampSampler, type GCacheKeyConfig } from "../config.js";
 import type { GCacheKey } from "../key.js";
 import type { CacheGetResult } from "./cache-result.js";
-import { resolveLayerConfigResult } from "./runtime-config.js";
+import { fetchKeyConfig, resolveLayerConfigResult } from "./runtime-config.js";
 
 export type Fallback<T> = () => Promise<T>;
 
@@ -37,8 +37,8 @@ export class LocalCache {
     return result.status === "hit" ? result.value : undefined;
   }
 
-  async getIfPresentResult<T>(key: GCacheKey): Promise<CacheGetResult<T>> {
-    const layerConfig = await this.resolveLocalLayerConfig(key);
+  async getIfPresentResult<T>(key: GCacheKey, keyConfig?: GCacheKeyConfig | null): Promise<CacheGetResult<T>> {
+    const layerConfig = await this.resolveLocalLayerConfig(key, keyConfig);
     if (layerConfig.status === "disabled") {
       return layerConfig;
     }
@@ -87,9 +87,11 @@ export class LocalCache {
     return cache;
   }
 
-  private async resolveLocalLayerConfig(key: GCacheKey) {
+  private async resolveLocalLayerConfig(key: GCacheKey, keyConfig?: GCacheKeyConfig | null) {
+    // Chain callers pass the once-resolved config; standalone callers omit it and we fetch.
+    const config = keyConfig === undefined ? await fetchKeyConfig(this.configProvider, key) : keyConfig;
     return await resolveLayerConfigResult({
-      configProvider: this.configProvider,
+      config,
       key,
       layer: CacheLayer.LOCAL,
       rampSampler: this.rampSampler,

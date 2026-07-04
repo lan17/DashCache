@@ -1,12 +1,12 @@
 import { performance } from "node:perf_hooks";
 
-import { CacheLayer, DEFAULT_WATERMARK_TTL_SEC, type CacheConfigProvider, type CacheRampSampler } from "../config.js";
+import { CacheLayer, DEFAULT_WATERMARK_TTL_SEC, type CacheConfigProvider, type CacheRampSampler, type GCacheKeyConfig } from "../config.js";
 import { invalidationPrefix, redisClusterHashTag, type GCacheKey } from "../key.js";
 import type { GCacheMetricsAdapter } from "../metrics.js";
 import { labelsFor } from "../metrics.js";
 import { JsonSerializer, type Serializer } from "../serializer.js";
 import type { CacheGetResult } from "./cache-result.js";
-import { resolveLayerConfigResult } from "./runtime-config.js";
+import { fetchKeyConfig, resolveLayerConfigResult } from "./runtime-config.js";
 
 export type Awaitable<T> = T | Promise<T>;
 export type RedisStoredValue = string | Buffer;
@@ -82,8 +82,8 @@ export class RedisCache {
     return result.status === "hit" ? result.value : undefined;
   }
 
-  async getResult<T>(key: GCacheKey): Promise<CacheGetResult<T>> {
-    const layerConfig = await this.resolveRemoteLayerConfig(key);
+  async getResult<T>(key: GCacheKey, keyConfig?: GCacheKeyConfig | null): Promise<CacheGetResult<T>> {
+    const layerConfig = await this.resolveRemoteLayerConfig(key, keyConfig);
     if (layerConfig.status === "disabled") {
       return layerConfig;
     }
@@ -291,9 +291,11 @@ export class RedisCache {
     throw new Error("Redis client does not implement setEx/setex/set");
   }
 
-  private async resolveRemoteLayerConfig(key: GCacheKey) {
+  private async resolveRemoteLayerConfig(key: GCacheKey, keyConfig?: GCacheKeyConfig | null) {
+    // Chain callers pass the once-resolved config; standalone callers omit it and we fetch.
+    const config = keyConfig === undefined ? await fetchKeyConfig(this.configProvider, key) : keyConfig;
     return await resolveLayerConfigResult({
-      configProvider: this.configProvider,
+      config,
       key,
       layer: CacheLayer.REMOTE,
       rampSampler: this.rampSampler,
