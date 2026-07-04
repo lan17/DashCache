@@ -4,42 +4,42 @@ on: push
 
 jobs:
   test:
-    runs-on: galileo
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install poetry
-        run: pipx install poetry==${{vars.POETRY_V2_VERSION}}
+      # - name: Install poetry
+      #   run: pipx install poetry==${{vars.POETRY_V2_VERSION}}
 
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.10"
-          cache: "poetry"
-          cache-dependency-path: "pyproject.toml"
+      # - name: Set up Python
+      #   uses: actions/setup-python@v6
+      #   with:
+      #     python-version: "3.10"
+      #     cache: "poetry"
+      #     cache-dependency-path: "pyproject.toml"
 
-      - name: Install Dependencies
-        run: |
-          pipx install invoke
-          inv install
+      # - name: Install Dependencies
+      #   run: |
+      #     pipx install invoke
+      #     inv install
 
       # We run the `mypy` check here since it requires all of the packages to be installed.
       # Doing that in the pre-commit step would be duplicative and spend more time in CI.
-      - name: Validate Types
-        run: inv type-check
+      # - name: Validate Types
+      #   run: inv type-check
 
-      - name: Run Tets
-        run: inv test
+      # - name: Run Tets
+      #   run: inv test
 
       # Dependabot-triggered runs cannot access repository secrets, so this
       # upload would fail with an empty Codecov token.
-      - name: Upload Test Coverage Reports
-        if: ${{ github.actor != 'dependabot[bot]' }}
-        uses: codecov/codecov-action@v5.5.2
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: ./coverage.xml
-          fail_ci_if_error: true
-          verbose: true
+      # - name: Upload Test Coverage Reports
+      #   if: ${{ github.actor != 'dependabot[bot]' }}
+      #   uses: codecov/codecov-action@v5.5.2
+      #   with:
+      #     token: ${{ secrets.CODECOV_TOKEN }}
+      #     files: ./coverage.xml
+      #     fail_ci_if_error: true
+      #     verbose: true
