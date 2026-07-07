@@ -5,14 +5,17 @@ import { CacheLayer, GCache, GCacheKeyConfig, type GCacheMetricsAdapter, type Re
 interface Deferred<T> {
   readonly promise: Promise<T>;
   resolve: (value: T) => void;
+  reject: (error: unknown) => void;
 }
 
 function deferred<T>(): Deferred<T> {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((res) => {
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
     resolve = res;
+    reject = rej;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
@@ -180,6 +183,85 @@ describe("GCache request coalescing", () => {
       { id: "1", calls: 1 },
       { id: "1", calls: 1 },
     ]);
+  });
+
+  it("keeps different keys isolated while coalescing concurrent misses", async () => {
+    const gate = deferred<void>();
+    const gcache = new GCache();
+    let calls = 0;
+    const getUser = gcache.cached(
+      async (id: string) => {
+        calls += 1;
+        const call = calls;
+        await gate.promise;
+        return { id, calls: call };
+      },
+      {
+        keyType: "user_id",
+        useCase: "CoalesceDistinctKeys",
+        cacheKey: (id) => id,
+        defaultConfig: GCacheKeyConfig.enabled(60),
+      },
+    );
+
+    const inflight = gcache.enable(async () => await Promise.all([getUser("1"), getUser("2")]));
+    await tick();
+    gate.resolve();
+    const results = await inflight;
+
+    expect(calls).toBe(2);
+    expect(results).toEqual([
+      { id: "1", calls: 1 },
+      { id: "2", calls: 2 },
+    ]);
+  });
+
+  it("clears in-flight state after a coalesced fallback rejects", async () => {
+    let gate = deferred<void>();
+    const gcache = new GCache();
+    let calls = 0;
+    const getUser = gcache.cached(
+      async (id: string) => {
+        calls += 1;
+        const call = calls;
+        await gate.promise;
+        return { id, calls: call };
+      },
+      {
+        keyType: "user_id",
+        useCase: "CoalesceRejectCleanup",
+        cacheKey: (id) => id,
+        defaultConfig: GCacheKeyConfig.enabled(60),
+      },
+    );
+
+    const rejected = await gcache.enable(async () => {
+      const first = getUser("1");
+      const second = getUser("1");
+      await tick();
+      gate.reject(new Error("database failed"));
+      return await Promise.allSettled([first, second]);
+    });
+
+    expect(calls).toBe(1);
+    expect(rejected).toEqual([
+      { status: "rejected", reason: expect.any(Error) },
+      { status: "rejected", reason: expect.any(Error) },
+    ]);
+    for (const result of rejected) {
+      expect(result.status === "rejected" ? result.reason.message : undefined).toBe("database failed");
+    }
+
+    gate = deferred();
+    const retry = gcache.enable(async () => {
+      const value = getUser("1");
+      await tick();
+      gate.resolve();
+      return await value;
+    });
+
+    await expect(retry).resolves.toEqual({ id: "1", calls: 2 });
+    expect(calls).toBe(2);
   });
 
   it("does not coalesce outside an enabled context", async () => {

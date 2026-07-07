@@ -393,13 +393,13 @@ describe("GCache Redis TTL layer", () => {
     const first = await gcache.enable(async () => await getUser("123"));
     const second = await gcache.enable(async () => await getUser("123"));
 
-    // Then the decode failure fails open through fallback, records the cache read error, and overwrites Redis.
+    // Then the decode failure is treated as a refreshable miss and overwrites Redis.
     expect(first).toEqual({ userId: "123", source: "fallback-1" });
     expect(second).toEqual({ userId: "123", source: "fallback-1" });
     expect(calls).toBe(1);
     expect(serializer.load).toHaveBeenCalledTimes(2);
     expect(serializer.dump).toHaveBeenCalledOnce();
-    expect(logger.warn).toHaveBeenCalledWith("Error getting value from Redis cache", expect.any(Error));
+    expect(logger.warn).not.toHaveBeenCalledWith("Error getting value from Redis cache", expect.any(Error));
   });
 
   it("refreshes stale or malformed Redis envelopes by falling through to fallback", async () => {

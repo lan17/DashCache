@@ -3,7 +3,7 @@ import { performance } from "node:perf_hooks";
 import { CacheLayer, DEFAULT_WATERMARK_TTL_SEC, type CacheConfigProvider, type CacheRampSampler, type GCacheKeyConfig } from "../config.js";
 import { invalidationPrefix, redisClusterHashTag, type GCacheKey } from "../key.js";
 import type { GCacheMetricsAdapter } from "../metrics.js";
-import { labelsFor } from "../metrics.js";
+import { errorName, labelsFor } from "../metrics.js";
 import { JsonSerializer, type Serializer } from "../serializer.js";
 import type { CacheGetResult } from "./cache-result.js";
 import { fetchKeyConfig, resolveLayerConfigResult, type ResolvedLayerConfig } from "./runtime-config.js";
@@ -119,6 +119,10 @@ export class RedisCache {
     try {
       const value = (await this.serializerFor(key).load(this.decodePayload(envelope))) as T;
       return { status: "hit", value };
+    } catch (error) {
+      await client.del(redisKey);
+      this.recordMetric((metrics) => metrics.error({ ...labelsFor(key, CacheLayer.REMOTE), error: errorName(error), inFallback: false }));
+      return { status: "miss", config: layerConfig, ...(watermarkIsActive(watermarkMs) ? { skipCacheWrite: true } : {}) };
     } finally {
       this.recordMetric((metrics) => metrics.observeSerialization({ ...labelsFor(key, CacheLayer.REMOTE), operation: "load" }, elapsedSeconds(start)));
     }

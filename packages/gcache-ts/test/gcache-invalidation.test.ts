@@ -17,6 +17,7 @@ import {
   type RedisStoredValue,
   type RedisValueEnvelope,
   type SerializationMetricLabels,
+  type Serializer,
 } from "../src/index.js";
 import { RedisCache } from "../src/internal/redis-cache.js";
 
@@ -446,6 +447,65 @@ describe("GCache targeted invalidation watermarks", () => {
     expect(second).toEqual({ userId: "123", calls: 1 });
     expect(calls).toBe(1);
     expect(logger.warn).not.toHaveBeenCalledWith("Error getting value from Redis cache", expect.any(Error));
+  });
+
+  it("refreshes tracked Redis entries when serializer load fails and no active watermark is present", async () => {
+    // Given a tracked key has a valid Redis envelope whose payload cannot be decoded by the configured serializer.
+    const redis = new FakeRedis();
+    const redisKey = valueKey("TrackedSerializerLoadFailure");
+    redis.values.set(redisKey, {
+      value: JSON.stringify({
+        version: 1,
+        createdAtMs: Date.now(),
+        expiresAtMs: Date.now() + 60_000,
+        encoding: "utf8",
+        payload: JSON.stringify({ userId: "123", source: "stale" }),
+      } satisfies RedisValueEnvelope),
+      ttlSec: 60,
+      expiresAtMs: Date.now() + 60_000,
+    });
+    let failNextLoad = true;
+    const serializer: Serializer<{ userId: string; source: string }> = {
+      dump: vi.fn(async (value) => JSON.stringify(value)),
+      load: vi.fn(async (value) => {
+        if (failNextLoad) {
+          failNextLoad = false;
+          throw new Error("load failed");
+        }
+        return JSON.parse(Buffer.isBuffer(value) ? value.toString("utf8") : value) as { userId: string; source: string };
+      }),
+    };
+    const logger = { debug: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const metrics = new RecordingMetrics();
+    const gcache = new GCache({ redis: { client: redis }, logger, metrics });
+    let calls = 0;
+    const getUser = gcache.cached(async (userId: string) => ({ userId, source: `fallback-${++calls}` }), {
+      keyType: "user_id",
+      useCase: "TrackedSerializerLoadFailure",
+      cacheKey: (userId) => userId,
+      trackForInvalidation: true,
+      defaultConfig: localAndRemote(),
+      serializer,
+    });
+
+    // When the bad payload is read twice.
+    const first = await gcache.enable(async () => await getUser("123"));
+    const second = await gcache.enable(async () => await getUser("123"));
+
+    // Then the first read repairs Redis/local cache instead of turning the tracked key into a persistent bypass.
+    const envelope = JSON.parse(redis.raw(redisKey)) as RedisValueEnvelope;
+    expect(first).toEqual({ userId: "123", source: "fallback-1" });
+    expect(second).toEqual({ userId: "123", source: "fallback-1" });
+    expect(JSON.parse(envelope.payload)).toEqual({ userId: "123", source: "fallback-1" });
+    expect(calls).toBe(1);
+    expect(redis.delCalls).toBe(1);
+    expect(serializer.load).toHaveBeenCalledOnce();
+    expect(serializer.dump).toHaveBeenCalledOnce();
+    expect(logger.warn).not.toHaveBeenCalledWith("Error getting value from Redis cache", expect.any(Error));
+    expect(metrics.events).toContainEqual({
+      name: "error",
+      labels: { useCase: "TrackedSerializerLoadFailure", keyType: "user_id", layer: CacheLayer.REMOTE, error: "Error", inFallback: false },
+    });
   });
 
   it("keeps delimiter-containing tracked prefixes distinct", async () => {
