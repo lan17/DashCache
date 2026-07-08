@@ -7,6 +7,7 @@ import {
   REDIS_ENCODING_UTF8,
   WRITE_CACHE_SCRIPT,
 } from "./internal/redis-scripts.js";
+import { GCacheRedisPayloadEncodingError, GCacheRedisPayloadError } from "./redis-client.js";
 import type { GCacheRedisClient, RedisCachePayload } from "./redis-client.js";
 
 const readReply = (reply: string | null): string | null => reply;
@@ -186,7 +187,7 @@ export function createNodeRedisGCacheClient(client: NodeRedisScriptClient): GCac
 
 function decodePayload(raw: string): RedisCachePayload {
   if (raw.length === 0) {
-    throw new Error("Invalid GCache Redis payload");
+    throw new GCacheRedisPayloadError("Invalid GCache Redis payload");
   }
 
   const encoding = raw.charCodeAt(0);
@@ -196,7 +197,7 @@ function decodePayload(raw: string): RedisCachePayload {
   if (encoding === REDIS_ENCODING_BASE64) {
     return { encoding: "base64", value: raw.slice(1) };
   }
-  throw new Error("Invalid GCache Redis payload encoding");
+  throw new GCacheRedisPayloadEncodingError("Invalid GCache Redis payload encoding");
 }
 
 function clusterCommands(client: NodeRedisScriptClient): NodeRedisClusterCommands | null {

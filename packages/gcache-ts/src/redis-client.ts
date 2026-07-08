@@ -1,5 +1,19 @@
 import type { Awaitable } from "./config.js";
 
+export class GCacheRedisPayloadError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "GCacheRedisPayloadError";
+  }
+}
+
+export class GCacheRedisPayloadEncodingError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "GCacheRedisPayloadEncodingError";
+  }
+}
+
 export type RedisPayloadEncoding = "utf8" | "base64";
 
 export interface RedisCachePayload {

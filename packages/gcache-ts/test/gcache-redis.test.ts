@@ -8,6 +8,7 @@ import {
   type GCacheRedisClient,
   type Serializer,
 } from "../src/index.js";
+import { GCacheRedisPayloadEncodingError } from "../src/redis-client.js";
 import { decodeFrame, encodeFrame, FakeRedis } from "./fake-redis.js";
 
 const keyFor = (id: string, useCase: string): GCacheKey => new GCacheKey({ keyType: "user_id", id, useCase });
@@ -367,6 +368,59 @@ describe("GCache Redis TTL layer", () => {
     expect(redis.values.get(badKey)).toBeDefined();
     expect(redis.values.get(nonFiniteKey)).toBeDefined();
     expect(logger.warn).not.toHaveBeenCalledWith("Error getting value from Redis cache", expect.any(Error));
+  });
+
+  it("records a distinct metric label when a Redis adapter reports invalid payload encoding", async () => {
+    const redisClient: GCacheRedisClient = {
+      read: vi.fn(async () => {
+        throw new GCacheRedisPayloadEncodingError("Invalid GCache Redis payload encoding");
+      }),
+      write: vi.fn(async () => true),
+      invalidate: vi.fn(async () => undefined),
+      flushAll: vi.fn(async () => undefined),
+    };
+    const logger = { debug: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const metrics = {
+      request: vi.fn(),
+      miss: vi.fn(),
+      disabled: vi.fn(),
+      error: vi.fn(),
+      invalidation: vi.fn(),
+      observeGet: vi.fn(),
+      observeFallback: vi.fn(),
+      observeSerialization: vi.fn(),
+      observeSize: vi.fn(),
+    };
+    const gcache = new GCache({ redis: { client: redisClient }, logger, metrics });
+    let calls = 0;
+    const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
+      keyType: "user_id",
+      useCase: "RedisBadPayloadEncoding",
+      cacheKey: (userId) => userId,
+      trackForInvalidation: true,
+      defaultConfig: new GCacheKeyConfig({
+        ttlSec: { [CacheLayer.LOCAL]: 0, [CacheLayer.REMOTE]: 60 },
+        ramp: { [CacheLayer.LOCAL]: 100, [CacheLayer.REMOTE]: 100 },
+      }),
+    });
+
+    const first = await gcache.enable(async () => await getUser("123"));
+    const second = await gcache.enable(async () => await getUser("123"));
+
+    expect(first).toEqual({ userId: "123", calls: 1 });
+    expect(second).toEqual({ userId: "123", calls: 2 });
+    expect(redisClient.write).not.toHaveBeenCalled();
+    expect(metrics.error).toHaveBeenCalledWith({
+      useCase: "RedisBadPayloadEncoding",
+      keyType: "user_id",
+      layer: CacheLayer.REMOTE,
+      error: "GCacheRedisPayloadEncodingError",
+      inFallback: false,
+    });
+    expect(logger.warn).toHaveBeenCalledWith(
+      "Error getting value from Redis cache",
+      expect.objectContaining({ name: "GCacheRedisPayloadEncodingError" }),
+    );
   });
 
   it("falls through when remote config is missing and propagates Redis maintenance errors", async () => {
