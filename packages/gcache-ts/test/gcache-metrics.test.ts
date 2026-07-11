@@ -10,30 +10,9 @@ import {
   type ErrorMetricLabels,
   type GCacheMetricsAdapter,
   type InvalidationMetricLabels,
-  type RedisCommandClient,
-  type RedisStoredValue,
   type SerializationMetricLabels,
 } from "../src/index.js";
-
-class FakeRedis implements RedisCommandClient {
-  readonly values = new Map<string, RedisStoredValue>();
-  failGet = false;
-
-  async get(key: string): Promise<RedisStoredValue | null> {
-    if (this.failGet) {
-      throw new Error("redis unavailable");
-    }
-    return this.values.get(key) ?? null;
-  }
-
-  async setEx(key: string, _ttlSec: number, value: RedisStoredValue): Promise<void> {
-    this.values.set(key, value);
-  }
-
-  async del(key: string): Promise<number> {
-    return this.values.delete(key) ? 1 : 0;
-  }
-}
+import { FakeRedis } from "./fake-redis.js";
 
 class RecordingMetrics implements GCacheMetricsAdapter {
   readonly events: Array<{ readonly name: string; readonly labels: Record<string, unknown>; readonly value?: number }> = [];

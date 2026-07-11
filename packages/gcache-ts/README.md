@@ -9,6 +9,8 @@ TypeScript port of GCache. Milestone 5 ships explicit enabled contexts, stable k
 
 ```bash
 pnpm add @rungalileo/gcache
+# For Redis-backed caching:
+pnpm add redis@~4.7.1
 ```
 
 ## Quick start
@@ -37,18 +39,29 @@ const user = await gcache.enable(() => getUser("123"));
 
 ## Redis-backed TTL cache
 
-Pass a small Redis command-surface client, or a lazy factory, to enable the read-through chain:
+Register GCache's native node-redis scripts when creating the client, then pass that client to GCache:
 
 ```ts
+import { createClient } from "redis";
 import { GCache, GCacheKeyConfig } from "@rungalileo/gcache";
+import { createNodeRedisGCacheClient, gcacheRedisScripts } from "@rungalileo/gcache/node-redis";
+
+const redisClient = createClient({
+  url: process.env.REDIS_URL,
+  scripts: gcacheRedisScripts,
+});
+await redisClient.connect();
 
 const gcache = new GCache({
   redis: {
-    client: redisClient, // implements get, del, flushAll/flushall, setEx/setex/set({ EX }), and mGet/mget for tracked invalidation
+    client: createNodeRedisGCacheClient(redisClient),
     keyPrefix: "gcache:",
   },
 });
 ```
+
+> [!IMPORTANT]
+> The Lua protocol changes the experimental Redis client contract. Existing callers must wrap node-redis with `createNodeRedisGCacheClient`; raw command clients are no longer accepted by `redis.client` or `redis.createClient`. The former `RedisCommandClient`, `RedisStoredValue`, and `RedisValueEnvelope` exports have been replaced by the `GCacheRedisClient` semantic interface and its request/payload types.
 
 When caching is enabled, reads flow through:
 
@@ -62,29 +75,37 @@ local cache -> Redis cache -> fallback function
 - Redis cache read/write failures are logged, counted in metrics, and fail open; fallback results still return when fallback succeeds. Explicit maintenance calls (`invalidateRemote`, `flushAll`) log/count Redis failures and rethrow them so callers do not assume mutation succeeded.
 - Missing per-layer config disables that layer, records a disabled reason, and falls through to the next layer/fallback.
 
-You can also provide `createClient` for lazy client construction:
+Node-redis computes each script's SHA, uses `EVALSHA`, and retries with `EVAL` after `NOSCRIPT`. Its cluster client routes scripts by their first key and performs that fallback on the selected shard. Tracked reads are deliberately routed to primaries so a lagging Redis replica cannot hide an invalidation watermark. The adapter also fans `flushAll()` across every cluster master instead of silently clearing one shard.
+
+You can also provide a lazy factory that returns a script-enabled client:
 
 ```ts
 const gcache = new GCache({
   redis: {
-    createClient: async () => createRedisClient({ url: process.env.REDIS_URL }),
+    createClient: async () => {
+      const client = createClient({
+        url: process.env.REDIS_URL,
+        scripts: gcacheRedisScripts,
+      });
+      await client.connect();
+      return createNodeRedisGCacheClient(client);
+    },
   },
 });
 ```
 
-Redis payloads use a TypeScript-specific JSON envelope, not the Python pickle format:
+The core Redis boundary is the client-agnostic `GCacheRedisClient` interface. Other clients can implement that semantic interface without changing GCache; distinct untracked/tracked read and write Lua sources, the invalidation source, and wire constants are available from `@rungalileo/gcache/redis-protocol`, so a Valkey GLIDE adapter can be added without depending on node-redis. Custom adapters can use the root-exported `GCacheRedisPayloadError` and `GCacheRedisPayloadEncodingError` classes to preserve the standard metrics labels.
 
-```ts
-type RedisValueEnvelope = {
-  version: 1;
-  createdAtMs: number;
-  expiresAtMs: number;
-  encoding: "utf8" | "base64";
-  payload: string;
-};
+Redis values use a compact binary frame:
+
+```text
+byte 1      format version
+bytes 2-9   Redis-created timestamp in milliseconds (uint64, big-endian)
+byte 10     payload encoding (0 = UTF-8, 1 = base64)
+bytes 11... serialized payload
 ```
 
-`payload` is produced by the cached function's serializer, or by `JsonSerializer` by default. Custom serializers can return either `string` or `Buffer`; Buffer payloads are base64 encoded in the envelope.
+Redis's Lua `struct` library packs and unpacks the timestamp. Redis TTL is authoritative, so expiry metadata is not duplicated in the frame. `payload` is produced by the cached function's serializer, or by `JsonSerializer` by default. Custom serializers can return either `string` or `Buffer`; Buffer payloads are base64 encoded and reconstructed before `serializer.load`.
 
 ## Targeted invalidation and watermarks
 
@@ -92,8 +113,9 @@ Mutable Redis-backed use cases can opt into targeted invalidation by setting `tr
 
 ```ts
 import { CacheLayer, GCache, GCacheKeyConfig } from "@rungalileo/gcache";
+import { createNodeRedisGCacheClient } from "@rungalileo/gcache/node-redis";
 
-const gcache = new GCache({ redis: { client: redisClient } });
+const gcache = new GCache({ redis: { client: createNodeRedisGCacheClient(redisClient) } });
 
 const getUser = gcache.cached(
   (userId: string) => db.fetchUser(userId),
@@ -114,11 +136,15 @@ await updateUser("123", patch);
 await gcache.invalidateRemote("user_id", "123");
 ```
 
-Invalidation writes a Redis watermark at `{encodedUrnPrefix:encodedKeyType:encodedId}#watermark`. Tracked Redis cache entries use the same Redis Cluster hash tag, for example `{urn:user_id:123}?locale=en#GetMutableUser`, so the value key and watermark key live in the same slot. Key components are percent-encoded before joining so delimiters inside IDs or args cannot collide with delimiters in the key format. Components may not contain `{` or `}` because those characters would corrupt the hash tag.
+Invalidation writes a Redis watermark at `{encodedUrnPrefix:encodedKeyType:encodedId}#watermark`. Tracked Redis cache entries use the same Redis Cluster hash tag, for example `{urn:user_id:123}?locale=en#GetMutableUser:gcache-frame-v1`, so the value key and watermark key live in the same slot. Key components are percent-encoded before joining so delimiters inside IDs or args cannot collide with delimiters in the key format. Components may not contain `{` or `}` because those characters would corrupt the hash tag.
 
-A cached Redis value whose `createdAtMs` is older than or equal to the watermark is treated as stale and refreshed through fallback. `invalidateRemote(keyType, id, futureBufferMs)` can extend the watermark into the future during write races; while the watermark is still in the future, fallback results are returned but not written to Redis or local cache.
+The internal `:gcache-frame-v1` suffix isolates binary values from the previous JSON representation during upgrades and rollbacks. Watermarks remain decimal timestamps so both formats can read them, but legacy invalidators use application clocks and can move a watermark backward. Deploy this wire-protocol change to every invalidating process before enabling tracked binary entries; mixed-version invalidation is not a supported steady state.
 
-Watermarks use `DEFAULT_WATERMARK_TTL_SEC` (4 hours) by default. You can override it with `redis.watermarkTtlSec`, but it must exceed the maximum Redis cache TTL for invalidation-tracked data; otherwise a watermark can expire before old cached values do.
+A cached Redis value whose Redis-created timestamp is older than or equal to the watermark is treated as stale and refreshed through fallback. `invalidateRemote(keyType, id, futureBufferMs)` sets the watermark to the greater of its existing value and Redis's current time plus the buffer. While that future window is active, fallback results are returned but not written to Redis or local cache.
+
+Tracked writes create a baseline watermark and extend its TTL to at least the value TTL plus one minute. Invalidation preserves that lifetime and extends it to cover the future buffer. `DEFAULT_WATERMARK_TTL_SEC` (4 hours) remains a configurable floor rather than a maximum, and reads do not extend watermark lifetime.
+
+`futureBufferMs` must be a nonnegative safe integer. Size it to cover the longest interval from invalidation until any fallback that could have read stale source data completes its Redis write. Include source-replication lag, remaining fallback work, `serializer.dump`, Redis client queue/network latency, script execution, and a safety margin. Invalidate after the source mutation commits. The buffer prevents stale fallback results from being cached under those assumptions; it does not itself force the current fallback to read from an authoritative source.
 
 Local cache limitation: targeted invalidation is enforced by Redis watermarks. Existing local cache hits are not synchronously invalidated across processes, so strongly invalidated mutable data should disable the local layer (or use very short local TTLs only when stale reads are acceptable).
 
@@ -251,7 +277,7 @@ app.get("/metrics", async (_req, res) => {
 
 For non-Prometheus telemetry, inject a `GCacheMetricsAdapter` through `new GCache({ metrics })`. Pass `metrics: false` to disable metrics entirely. GCache reuses existing collectors in a registry so repeated instances with the same prefix do not throw duplicate-registration errors.
 
-## Milestone 5 scope
+## Current scope
 
 Included:
 
@@ -259,7 +285,10 @@ Included:
 - Redis TTL cache
 - Local → Redis → fallback read-through chain
 - Lazy Redis client factory support
-- Timestamped, versioned Redis envelope
+- Lua-backed Redis reads and writes with Redis-generated timestamps
+- Versioned binary Redis frames for UTF-8 and Buffer serializer output
+- Native node-redis script registration with automatic `NOSCRIPT` recovery
+- Standalone Redis, Valkey, and Redis Cluster support
 - JSON and custom serializer support for Redis values
 - Duplicate and reserved use-case validation
 - `invalidateRemote` for Redis watermark invalidation and `flushAll` across configured layers
@@ -276,7 +305,7 @@ Included:
 - `trackForInvalidation` on cached functions
 - `invalidateRemote(keyType, id, futureBufferMs)` Redis watermark API
 - Redis Cluster hash-tagged value/watermark keys for invalidation-tracked entries
-- Configurable Redis watermark TTL via `redis.watermarkTtlSec` with `DEFAULT_WATERMARK_TTL_SEC`
+- Dynamically extended watermark TTL with a configurable `DEFAULT_WATERMARK_TTL_SEC` floor
 - Future-buffer behavior that avoids cache writes during active invalidation windows
 - Request coalescing for active cache work after local misses
 

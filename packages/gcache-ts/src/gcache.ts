@@ -165,6 +165,8 @@ export class GCache {
    * Writes a remote invalidation watermark for Redis-tracked entries.
    *
    * This does not synchronously evict local cache hits or untracked Redis values.
+   *
+   * @param futureBufferMs Nonnegative safe integer covering source lag and stale fallback work through the Redis write.
    */
   async invalidateRemote(keyType: string, id: Id, futureBufferMs = 0): Promise<void> {
     assertValidFutureBufferMs(futureBufferMs);
@@ -442,8 +444,8 @@ function elapsedSeconds(startMs: number): number {
 }
 
 function assertValidFutureBufferMs(futureBufferMs: number): void {
-  if (!Number.isFinite(futureBufferMs) || futureBufferMs < 0) {
-    throw new RangeError("GCache invalidation futureBufferMs must be a finite nonnegative number");
+  if (!Number.isSafeInteger(futureBufferMs) || futureBufferMs < 0) {
+    throw new RangeError("GCache invalidation futureBufferMs must be a nonnegative safe integer");
   }
 }
 

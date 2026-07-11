@@ -1,26 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { CacheLayer, GCacheKey, GCacheKeyConfig, type RedisCommandClient, type RedisStoredValue } from "../src/index.js";
+import { CacheLayer, GCacheKey, GCacheKeyConfig } from "../src/index.js";
 import { LocalCache } from "../src/internal/local-cache.js";
-import { RedisCache, type RedisValueEnvelope } from "../src/internal/redis-cache.js";
+import { RedisCache } from "../src/internal/redis-cache.js";
 import { resolveLayerConfig } from "../src/internal/runtime-config.js";
 import { errorName } from "../src/metrics.js";
-
-class MemoryRedis implements RedisCommandClient {
-  readonly values = new Map<string, RedisStoredValue>();
-
-  async get(key: string): Promise<RedisStoredValue | null> {
-    return this.values.get(key) ?? null;
-  }
-
-  async setEx(key: string, _ttlSec: number, value: RedisStoredValue): Promise<void> {
-    this.values.set(key, value);
-  }
-
-  async del(key: string): Promise<number> {
-    return this.values.delete(key) ? 1 : 0;
-  }
-}
+import { encodeFrame, FakeRedis } from "./fake-redis.js";
 
 const key = (defaultConfig: GCacheKeyConfig | null = GCacheKeyConfig.enabled(60)) =>
   new GCacheKey({ keyType: "user_id", id: "123", useCase: "ObservabilityInternals", defaultConfig });
@@ -46,8 +31,8 @@ describe("GCache observability internal compatibility paths", () => {
   });
 
   it("keeps RedisCache get compatibility and skips writes when remote config is disabled", async () => {
-    // Given a Redis cache with one valid stored envelope and one key without remote config.
-    const redis = new MemoryRedis();
+    // Given a Redis cache with one valid stored frame and one key without remote config.
+    const redis = new FakeRedis();
     const redisCache = new RedisCache({
       configProvider: async () => null,
       rampSampler: () => 0,
@@ -64,16 +49,7 @@ describe("GCache observability internal compatibility paths", () => {
         ramp: { [CacheLayer.LOCAL]: 100 },
       }),
     });
-    redis.values.set(
-      enabledKey.urn,
-      JSON.stringify({
-        version: 1,
-        createdAtMs: Date.now(),
-        expiresAtMs: Date.now() + 60_000,
-        encoding: "utf8",
-        payload: JSON.stringify({ source: "redis" }),
-      } satisfies RedisValueEnvelope),
-    );
+    redis.setRaw(`${enabledKey.urn}:gcache-frame-v1`, encodeFrame({ source: "redis" }));
 
     // When the compatibility get() reads Redis and put() sees disabled remote config.
     const hit = await redisCache.get<{ source: string }>(enabledKey);
@@ -81,7 +57,7 @@ describe("GCache observability internal compatibility paths", () => {
 
     // Then get() unwraps the value and the disabled remote write is skipped.
     expect(hit).toEqual({ source: "redis" });
-    expect(redis.values.has(disabledKey.urn)).toBe(false);
+    expect(redis.values.has(`${disabledKey.urn}:gcache-frame-v1`)).toBe(false);
   });
 
   it("preserves runtime-config and error-name edge behavior used by metrics", async () => {

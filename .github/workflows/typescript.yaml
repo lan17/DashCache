@@ -32,3 +32,9 @@ jobs:
       #     fail_ci_if_error: true
       #     verbose: true
       - run: pnpm ts:gcache:build
+      - run: pnpm ts:gcache:test:integration
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "18"
+          cache: "pnpm"
+      - run: pnpm ts:gcache:test:package

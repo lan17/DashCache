@@ -1,0 +1,521 @@
+import { createClient } from "redis";
+import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+
+import {
+  CacheLayer,
+  GCache,
+  GCacheKeyConfig,
+  type GCacheMetricsAdapter,
+  type GCacheRedisClient,
+  type Serializer,
+} from "../src/index.js";
+import { createNodeRedisGCacheClient, gcacheRedisScripts } from "../src/node-redis.js";
+
+const engines = [
+  { name: "Redis 6.2", image: "redis:6.2-alpine" },
+  { name: "Valkey 8", image: "valkey/valkey:8-alpine" },
+] as const;
+
+const remoteOnly = new GCacheKeyConfig({
+  ttlSec: { [CacheLayer.REMOTE]: 60 },
+  ramp: { [CacheLayer.REMOTE]: 100 },
+});
+
+const createTestClient = (url: string) => createClient({ url, scripts: gcacheRedisScripts });
+
+function encodeFrame(payload: string, encoding: number, createdAtMs = Date.now(), version = 1): Buffer {
+  const timestamp = Buffer.alloc(8);
+  timestamp.writeBigUInt64BE(BigInt(createdAtMs));
+  return Buffer.concat([Buffer.from([version]), timestamp, Buffer.from([encoding]), Buffer.from(payload)]);
+}
+
+describe.each(engines)("GCache Lua protocol on $name", ({ image }) => {
+  let container: StartedTestContainer | undefined;
+  let client: ReturnType<typeof createTestClient> | undefined;
+
+  beforeAll(async () => {
+    container = await new GenericContainer(image)
+      .withExposedPorts(6379)
+      .withWaitStrategy(Wait.forListeningPorts())
+      .start();
+    client = createTestClient(`redis://${container.getHost()}:${container.getMappedPort(6379)}`);
+    client.on("error", () => undefined);
+    await client.connect();
+  });
+
+  afterAll(async () => {
+    await client?.quit();
+    await container?.stop();
+  });
+
+  it("round-trips untracked UTF-8 and binary values", async () => {
+    if (client === undefined) {
+      throw new Error("Redis client did not start");
+    }
+    const scriptClient: GCacheRedisClient = createNodeRedisGCacheClient(client);
+    const gcache = new GCache({ redis: { client: scriptClient, keyPrefix: "real:" } });
+    let jsonCalls = 0;
+    let binaryCalls = 0;
+    const getJson = gcache.cached(async (id: string) => ({ id, calls: ++jsonCalls }), {
+      keyType: "item_id",
+      useCase: "RealJson",
+      cacheKey: (id) => id,
+      defaultConfig: remoteOnly,
+    });
+    const binarySerializer: Serializer<string> = {
+      dump: async (value) => Buffer.from(value, "utf8"),
+      load: async (value) => (Buffer.isBuffer(value) ? value.toString("utf8") : value),
+    };
+    const getBinary = gcache.cached(async (id: string) => `binary:${id}:${++binaryCalls}`, {
+      keyType: "item_id",
+      useCase: "RealBinary",
+      cacheKey: (id) => id,
+      defaultConfig: remoteOnly,
+      serializer: binarySerializer,
+    });
+
+    const firstJson = await gcache.enable(async () => await getJson("json"));
+    const secondJson = await gcache.enable(async () => await getJson("json"));
+    const firstBinary = await gcache.enable(async () => await getBinary("buffer"));
+    const secondBinary = await gcache.enable(async () => await getBinary("buffer"));
+
+    expect(firstJson).toEqual({ id: "json", calls: 1 });
+    expect(secondJson).toEqual(firstJson);
+    expect(firstBinary).toBe("binary:buffer:1");
+    expect(secondBinary).toBe(firstBinary);
+    expect(jsonCalls).toBe(1);
+    expect(binaryCalls).toBe(1);
+  });
+
+  it("recovers every distinct read and write script after SCRIPT FLUSH", async () => {
+    if (client === undefined) {
+      throw new Error("Redis client did not start");
+    }
+    const scriptClient = createNodeRedisGCacheClient(client);
+    const valueKey = "script-recovery:{item:untracked}:value";
+
+    expect(gcacheRedisScripts.gcacheRead.SHA1).not.toBe(gcacheRedisScripts.gcacheReadTracked.SHA1);
+    expect(gcacheRedisScripts.gcacheWrite.SHA1).not.toBe(gcacheRedisScripts.gcacheWriteTracked.SHA1);
+
+    await client.scriptFlush();
+    expect(await client.gcacheWrite(valueKey, 60_000, 0, "untracked")).toBe(1);
+    await client.scriptFlush();
+    expect(await scriptClient.read({ valueKey })).toEqual({ encoding: "utf8", value: "untracked" });
+
+    const trackedValueKey = "script-recovery:{item:tracked}:value";
+    const watermarkKey = "script-recovery:{item:tracked}:watermark";
+    await client.scriptFlush();
+    expect(await client.gcacheWriteTracked(trackedValueKey, watermarkKey, 60_000, 0, "tracked", 60_000)).toBe(1);
+    await client.scriptFlush();
+    expect(await scriptClient.read({ valueKey: trackedValueKey, watermarkKey })).toEqual({
+      encoding: "utf8",
+      value: "tracked",
+    });
+  });
+
+  it("treats every invalid read frame and watermark state as a miss", async () => {
+    if (client === undefined) {
+      throw new Error("Redis client did not start");
+    }
+    const scriptClient = createNodeRedisGCacheClient(client);
+    const valueKey = "read-paths:{item:read}:value";
+    const watermarkKey = "read-paths:{item:read}:watermark";
+
+    expect(await scriptClient.read({ valueKey })).toBeNull();
+
+    await client.set(valueKey, Buffer.alloc(9));
+    expect(await scriptClient.read({ valueKey })).toBeNull();
+
+    await client.set(valueKey, encodeFrame("wrong-version", 0, 1_000, 2));
+    expect(await scriptClient.read({ valueKey })).toBeNull();
+
+    await client.set(valueKey, encodeFrame("tracked", 0, 1_000));
+    expect(await scriptClient.read({ valueKey, watermarkKey })).toBeNull();
+
+    await client.set(watermarkKey, "not-a-watermark");
+    expect(await scriptClient.read({ valueKey, watermarkKey })).toBeNull();
+
+    await client.set(watermarkKey, "9".repeat(400));
+    expect(await scriptClient.read({ valueKey, watermarkKey })).toBeNull();
+
+    await client.set(watermarkKey, "1000");
+    expect(await scriptClient.read({ valueKey, watermarkKey })).toBeNull();
+
+    await client.set(watermarkKey, "999.5");
+    expect(await scriptClient.read({ valueKey, watermarkKey })).toEqual({ encoding: "utf8", value: "tracked" });
+  });
+
+  it("rejects invalid raw script arguments before mutating Redis", async () => {
+    if (client === undefined) {
+      throw new Error("Redis client did not start");
+    }
+    const valueKey = "invalid-args:{item:invalid}:value";
+    const watermarkKey = "invalid-args:{item:invalid}:watermark";
+    const notANumber = "not-a-number" as unknown as number;
+
+    await expect(client.gcacheWrite(valueKey, 0, 0, "value")).rejects.toThrow("invalid GCache TTL");
+    await expect(client.gcacheWrite(valueKey, notANumber, 0, "value")).rejects.toThrow("invalid GCache TTL");
+    await expect(client.gcacheWrite(valueKey, Number.NaN, 0, "value")).rejects.toThrow("invalid GCache TTL");
+    await expect(client.gcacheWrite(valueKey, Number.POSITIVE_INFINITY, 0, "value")).rejects.toThrow("invalid GCache TTL");
+    await expect(client.gcacheWrite(valueKey, Number.NEGATIVE_INFINITY, 0, "value")).rejects.toThrow("invalid GCache TTL");
+    await expect(client.gcacheWrite(valueKey, 1_000, notANumber, "value")).rejects.toThrow("invalid GCache payload encoding");
+    await expect(client.gcacheWrite(valueKey, 1_000, Number.NaN, "value")).rejects.toThrow("invalid GCache payload encoding");
+    await expect(client.gcacheWrite(valueKey, 1_000, 2, "value")).rejects.toThrow("invalid GCache payload encoding");
+    await expect(client.gcacheWriteTracked(valueKey, watermarkKey, 1_000, 0, "value", 0)).rejects.toThrow(
+      "invalid GCache watermark TTL",
+    );
+    await expect(client.gcacheWriteTracked(valueKey, watermarkKey, 1_000, 0, "value", Number.NaN)).rejects.toThrow(
+      "invalid GCache watermark TTL",
+    );
+    await expect(client.gcacheInvalidate(watermarkKey, -1, 1_000)).rejects.toThrow("invalid GCache future buffer");
+    await expect(client.gcacheInvalidate(watermarkKey, notANumber, 1_000)).rejects.toThrow("invalid GCache future buffer");
+    await expect(client.gcacheInvalidate(watermarkKey, Number.NaN, 1_000)).rejects.toThrow("invalid GCache future buffer");
+    await expect(client.gcacheInvalidate(watermarkKey, Number.POSITIVE_INFINITY, 1_000)).rejects.toThrow(
+      "invalid GCache future buffer",
+    );
+    await expect(client.gcacheInvalidate(watermarkKey, Number.NEGATIVE_INFINITY, 1_000)).rejects.toThrow(
+      "invalid GCache future buffer",
+    );
+    await expect(client.gcacheInvalidate(watermarkKey, 0, 0)).rejects.toThrow("invalid GCache watermark TTL");
+    await expect(client.gcacheInvalidate(watermarkKey, 0, notANumber)).rejects.toThrow("invalid GCache watermark TTL");
+    await expect(client.gcacheInvalidate(watermarkKey, 0, Number.NaN)).rejects.toThrow("invalid GCache watermark TTL");
+    await expect(client.gcacheInvalidate(watermarkKey, 0, Number.POSITIVE_INFINITY)).rejects.toThrow(
+      "invalid GCache watermark TTL",
+    );
+
+    expect(await client.exists([valueKey, watermarkKey])).toBe(0);
+  });
+
+  it("rounds fractional raw protocol durations upward", async () => {
+    if (client === undefined) {
+      throw new Error("Redis client did not start");
+    }
+    const valueKey = "fractional-args:{item:fractional}:value";
+    const watermarkKey = "fractional-args:{item:fractional}:watermark";
+
+    expect(await client.gcacheWrite(valueKey, 1_000.1, 0, "value")).toBe(1);
+    expect(await client.pTTL(valueKey)).toBeGreaterThan(900);
+    expect(await client.pTTL(valueKey)).toBeLessThanOrEqual(1_001);
+
+    const trackedValueKey = "fractional-args:{item:tracked-floor}:value";
+    const trackedWatermarkKey = "fractional-args:{item:tracked-floor}:watermark";
+    expect(
+      await client.gcacheWriteTracked(trackedValueKey, trackedWatermarkKey, 1_000, 0, "value", 70_000.1),
+    ).toBe(1);
+    expect(await client.get(trackedWatermarkKey)).toBe("0");
+    expect(await client.pTTL(trackedWatermarkKey)).toBeGreaterThan(69_000);
+    expect(await client.pTTL(trackedWatermarkKey)).toBeLessThanOrEqual(70_001);
+
+    const beforeMs = (await client.time()).getTime();
+    expect(await client.gcacheInvalidate(watermarkKey, 100.1, 70_000.1)).toBe(1);
+    const watermark = Number(await client.get(watermarkKey));
+    expect(Number.isSafeInteger(watermark)).toBe(true);
+    expect(watermark).toBeGreaterThanOrEqual(beforeMs + 101);
+    expect(await client.pTTL(watermarkKey)).toBeGreaterThan(69_000);
+    expect(await client.pTTL(watermarkKey)).toBeLessThanOrEqual(70_001);
+  });
+
+  it("invalidates tracked entries and recovers after SCRIPT FLUSH", async () => {
+    if (client === undefined) {
+      throw new Error("Redis client did not start");
+    }
+    const scriptClient: GCacheRedisClient = createNodeRedisGCacheClient(client);
+    const gcache = new GCache({ redis: { client: scriptClient, keyPrefix: "tracked:" } });
+    let version = 1;
+    let calls = 0;
+    const getUser = gcache.cached(async (id: string) => ({ id, version, calls: ++calls }), {
+      keyType: "user_id",
+      useCase: "RealTracked",
+      cacheKey: (id) => id,
+      trackForInvalidation: true,
+      defaultConfig: remoteOnly,
+    });
+
+    const first = await gcache.enable(async () => await getUser("123"));
+    version = 2;
+    const cached = await gcache.enable(async () => await getUser("123"));
+    await gcache.invalidateRemote("user_id", "123");
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    const refreshed = await gcache.enable(async () => await getUser("123"));
+    await client.scriptFlush();
+    const afterScriptFlush = await gcache.enable(async () => await getUser("123"));
+
+    expect(first).toEqual({ id: "123", version: 1, calls: 1 });
+    expect(cached).toEqual(first);
+    expect(refreshed).toEqual({ id: "123", version: 2, calls: 2 });
+    expect(afterScriptFlush).toEqual(refreshed);
+  });
+
+  it("fails open without caching malformed watermark state", async () => {
+    if (client === undefined) {
+      throw new Error("Redis client did not start");
+    }
+    const scriptClient = createNodeRedisGCacheClient(client);
+    const logger = { debug: () => undefined, warn: () => undefined, error: () => undefined };
+    const gcache = new GCache({ redis: { client: scriptClient, keyPrefix: "malformed:" }, logger });
+    let calls = 0;
+    const getUser = gcache.cached(async (id: string) => ({ id, calls: ++calls }), {
+      keyType: "user_id",
+      useCase: "MalformedWatermark",
+      cacheKey: (id) => id,
+      trackForInvalidation: true,
+      defaultConfig: remoteOnly,
+    });
+    await client.set("malformed:{urn:user_id:bad}#watermark", "0x10");
+
+    const first = await gcache.enable(async () => await getUser("bad"));
+    const second = await gcache.enable(async () => await getUser("bad"));
+
+    expect(first).toEqual({ id: "bad", calls: 1 });
+    expect(second).toEqual({ id: "bad", calls: 2 });
+  });
+
+  it("rejects malformed tracked watermark writes without overwriting the cached value", async () => {
+    if (client === undefined) {
+      throw new Error("Redis client did not start");
+    }
+    const scriptClient = createNodeRedisGCacheClient(client);
+    const valueKey = "malformed-write:{item:malformed}:value";
+    const watermarkKey = "malformed-write:{item:malformed}:watermark";
+    expect(await client.gcacheWrite(valueKey, 60_000, 0, "original")).toBe(1);
+
+    for (const malformed of ["not-a-watermark", "9".repeat(400)]) {
+      await client.set(watermarkKey, malformed, { PX: 60_000 });
+      await expect(client.gcacheWriteTracked(valueKey, watermarkKey, 60_000, 0, "replacement", 60_000)).rejects.toThrow(
+        "invalid GCache watermark",
+      );
+      expect(await scriptClient.read({ valueKey })).toEqual({ encoding: "utf8", value: "original" });
+    }
+  });
+
+  it("labels malformed payload encoding through the production adapter", async () => {
+    if (client === undefined) {
+      throw new Error("Redis client did not start");
+    }
+    const adapter = createNodeRedisGCacheClient(client);
+    const write = vi.fn(adapter.write);
+    const redisClient: GCacheRedisClient = { ...adapter, write };
+    const metrics: GCacheMetricsAdapter = {
+      request: vi.fn(),
+      miss: vi.fn(),
+      disabled: vi.fn(),
+      error: vi.fn(),
+      invalidation: vi.fn(),
+      coalesced: vi.fn(),
+      observeGet: vi.fn(),
+      observeFallback: vi.fn(),
+      observeSerialization: vi.fn(),
+      observeSize: vi.fn(),
+    };
+    const logger = { debug: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const keyPrefix = "bad-encoding:";
+    const valueKey = `${keyPrefix}{urn:user_id:bad}#RealMalformedEncoding:gcache-frame-v1`;
+    const watermarkKey = `${keyPrefix}{urn:user_id:bad}#watermark`;
+    await client.set(valueKey, encodeFrame("malformed", 2), { PX: 60_000 });
+    await client.set(watermarkKey, "0", { PX: 60_000 });
+
+    const gcache = new GCache({ redis: { client: redisClient, keyPrefix }, logger, metrics });
+    let calls = 0;
+    const getUser = gcache.cached(async (id: string) => ({ id, calls: ++calls }), {
+      keyType: "user_id",
+      useCase: "RealMalformedEncoding",
+      cacheKey: (id) => id,
+      trackForInvalidation: true,
+      defaultConfig: remoteOnly,
+    });
+
+    const value = await gcache.enable(async () => await getUser("bad"));
+
+    expect(value).toEqual({ id: "bad", calls: 1 });
+    expect(write).not.toHaveBeenCalled();
+    expect(metrics.error).toHaveBeenCalledWith({
+      useCase: "RealMalformedEncoding",
+      keyType: "user_id",
+      layer: CacheLayer.REMOTE,
+      error: "GCacheRedisPayloadEncodingError",
+      inFallback: false,
+    });
+    expect(logger.warn).toHaveBeenCalledWith(
+      "Error getting value from Redis cache",
+      expect.objectContaining({ name: "GCacheRedisPayloadEncodingError" }),
+    );
+  });
+
+  it("keeps future fractional watermarks alive without shortening longer TTLs", async () => {
+    if (client === undefined) {
+      throw new Error("Redis client did not start");
+    }
+    const scriptClient = createNodeRedisGCacheClient(client);
+    const redisNowMs = (await client.time()).getTime();
+    const legacyWatermark = redisNowMs + 30_000.5;
+    const shortTtlKey = "legacy:{urn:user_id:short}#watermark";
+    await client.set(shortTtlKey, String(legacyWatermark), { PX: 1_000 });
+
+    await scriptClient.invalidate({
+      watermarkKey: shortTtlKey,
+      futureBufferMs: 1_000,
+      watermarkTtlFloorMs: 60_000,
+    });
+
+    expect(Number(await client.get(shortTtlKey))).toBeGreaterThanOrEqual(Math.ceil(legacyWatermark));
+    expect(await client.pTTL(shortTtlKey)).toBeGreaterThan(89_000);
+
+    const longTtlKey = "legacy:{urn:user_id:long}#watermark";
+    await client.set(longTtlKey, String(legacyWatermark), { PX: 120_000 });
+    const ttlBefore = await client.pTTL(longTtlKey);
+
+    await scriptClient.invalidate({
+      watermarkKey: longTtlKey,
+      futureBufferMs: 1_000,
+      watermarkTtlFloorMs: 60_000,
+    });
+
+    expect(Number(await client.get(longTtlKey))).toBeGreaterThanOrEqual(Math.ceil(legacyWatermark));
+    const ttlAfter = await client.pTTL(longTtlKey);
+    expect(ttlAfter).toBeGreaterThan(ttlBefore - 1_000);
+    expect(ttlAfter).toBeLessThanOrEqual(ttlBefore);
+  });
+
+  it("creates missing and repairs malformed invalidation watermarks", async () => {
+    if (client === undefined) {
+      throw new Error("Redis client did not start");
+    }
+    const scriptClient = createNodeRedisGCacheClient(client);
+    const missingKey = "invalidate-paths:{item:missing}:watermark";
+    const beforeMs = (await client.time()).getTime();
+
+    await scriptClient.invalidate({ watermarkKey: missingKey, futureBufferMs: 100, watermarkTtlFloorMs: 1_000 });
+
+    const created = Number(await client.get(missingKey));
+    expect(Number.isSafeInteger(created)).toBe(true);
+    expect(created).toBeGreaterThanOrEqual(beforeMs + 100);
+    expect(await client.pTTL(missingKey)).toBeGreaterThan(60_000);
+
+    for (const [suffix, malformed] of [
+      ["syntax", "not-a-watermark"],
+      ["overflow", "9".repeat(400)],
+    ] as const) {
+      const watermarkKey = `invalidate-paths:{item:${suffix}}:watermark`;
+      await client.set(watermarkKey, malformed, { PX: 1_000 });
+      await scriptClient.invalidate({ watermarkKey, futureBufferMs: 0, watermarkTtlFloorMs: 2_000 });
+      expect(Number.isSafeInteger(Number(await client.get(watermarkKey)))).toBe(true);
+      expect(await client.pTTL(watermarkKey)).toBeGreaterThan(59_000);
+    }
+  });
+
+  it("keeps persistent invalidation watermarks persistent", async () => {
+    if (client === undefined) {
+      throw new Error("Redis client did not start");
+    }
+    const scriptClient = createNodeRedisGCacheClient(client);
+    const watermarkKey = "invalidate-persistent:{item:persistent}:watermark";
+    await client.set(watermarkKey, "1");
+
+    await scriptClient.invalidate({ watermarkKey, futureBufferMs: 0, watermarkTtlFloorMs: 60_000 });
+
+    expect(Number(await client.get(watermarkKey))).toBeGreaterThan(1);
+    expect(await client.pTTL(watermarkKey)).toBe(-1);
+  });
+
+  it("preserves a fractional legacy watermark while extending its TTL", async () => {
+    if (client === undefined) {
+      throw new Error("Redis client did not start");
+    }
+    const scriptClient = createNodeRedisGCacheClient(client);
+    const valueKey = "legacy-write:{urn:user_id:123}:value";
+    const watermarkKey = "legacy-write:{urn:user_id:123}:watermark";
+    await client.set(watermarkKey, "1.75", { PX: 1_000 });
+
+    const wrote = await scriptClient.write({
+      valueKey,
+      watermarkKey,
+      cacheTtlMs: 2_000,
+      encoding: "utf8",
+      value: "cached",
+      watermarkTtlFloorMs: 1_000,
+    });
+
+    expect(wrote).toBe(true);
+    expect(await client.get(watermarkKey)).toBe("1.75");
+    expect(await client.pTTL(watermarkKey)).toBeGreaterThanOrEqual(61_000);
+    expect(await scriptClient.read({ valueKey, watermarkKey })).toEqual({ encoding: "utf8", value: "cached" });
+  });
+
+  it("does not rewrite sufficient or persistent watermarks on tracked writes", async () => {
+    if (client === undefined) {
+      throw new Error("Redis client did not start");
+    }
+    const scriptClient = createNodeRedisGCacheClient(client);
+    const sufficientValueKey = "write-sufficient:{item:sufficient}:value";
+    const sufficientWatermarkKey = "write-sufficient:{item:sufficient}:watermark";
+    await client.set(sufficientWatermarkKey, "1.75", { PX: 120_000 });
+    const sufficientTtlBefore = await client.pTTL(sufficientWatermarkKey);
+
+    expect(
+      await scriptClient.write({
+        valueKey: sufficientValueKey,
+        watermarkKey: sufficientWatermarkKey,
+        cacheTtlMs: 2_000,
+        encoding: "utf8",
+        value: "cached",
+        watermarkTtlFloorMs: 1_000,
+      }),
+    ).toBe(true);
+
+    expect(await client.get(sufficientWatermarkKey)).toBe("1.75");
+    expect(await client.pTTL(sufficientWatermarkKey)).toBeGreaterThan(sufficientTtlBefore - 1_000);
+    expect(await client.pTTL(sufficientWatermarkKey)).toBeLessThanOrEqual(sufficientTtlBefore);
+
+    const persistentValueKey = "write-persistent:{item:persistent}:value";
+    const persistentWatermarkKey = "write-persistent:{item:persistent}:watermark";
+    await client.set(persistentWatermarkKey, "2.25");
+
+    expect(
+      await scriptClient.write({
+        valueKey: persistentValueKey,
+        watermarkKey: persistentWatermarkKey,
+        cacheTtlMs: 2_000,
+        encoding: "utf8",
+        value: "cached",
+        watermarkTtlFloorMs: 1_000,
+      }),
+    ).toBe(true);
+    expect(await client.get(persistentWatermarkKey)).toBe("2.25");
+    expect(await client.pTTL(persistentWatermarkKey)).toBe(-1);
+  });
+
+  it("atomically blocks writes during the buffer and extends watermark TTL", async () => {
+    if (client === undefined) {
+      throw new Error("Redis client did not start");
+    }
+    const scriptClient = createNodeRedisGCacheClient(client);
+    const valueKey = "protocol:{item:ttl}:value";
+    const watermarkKey = "protocol:{item:ttl}:watermark";
+    const writeRequest = {
+      valueKey,
+      watermarkKey,
+      cacheTtlMs: 2_000,
+      encoding: "utf8" as const,
+      value: "cached",
+      watermarkTtlFloorMs: 1_000,
+    };
+
+    expect(await scriptClient.write(writeRequest)).toBe(true);
+    expect(await client.get(watermarkKey)).toBe("0");
+    const ttlAfterWrite = await client.pTTL(watermarkKey);
+    expect(ttlAfterWrite).toBeGreaterThanOrEqual(61_000);
+
+    await scriptClient.invalidate({ watermarkKey, futureBufferMs: 100, watermarkTtlFloorMs: 1_000 });
+    expect(await scriptClient.read({ valueKey, watermarkKey })).toBeNull();
+    expect(await scriptClient.write({ ...writeRequest, value: "blocked" })).toBe(false);
+    expect(await scriptClient.read({ valueKey })).toEqual({ encoding: "utf8", value: "cached" });
+    const ttlBeforeRead = await client.pTTL(watermarkKey);
+    await scriptClient.read({ valueKey, watermarkKey });
+    expect(await client.pTTL(watermarkKey)).toBeLessThanOrEqual(ttlBeforeRead);
+
+    await new Promise((resolve) => setTimeout(resolve, 110));
+    expect(await scriptClient.write({ ...writeRequest, value: "fresh" })).toBe(true);
+    expect(await scriptClient.read({ valueKey, watermarkKey })).toEqual({ encoding: "utf8", value: "fresh" });
+  });
+});

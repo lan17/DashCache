@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { CacheLayer, GCache, GCacheKeyConfig, type GCacheMetricsAdapter, type RedisCommandClient, type RedisStoredValue } from "../src/index.js";
+import { CacheLayer, GCache, GCacheKeyConfig, type GCacheMetricsAdapter } from "../src/index.js";
+import { FakeRedis } from "./fake-redis.js";
 
 interface Deferred<T> {
   readonly promise: Promise<T>;
@@ -20,33 +21,10 @@ function deferred<T>(): Deferred<T> {
 
 const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
-class FakeRedis implements RedisCommandClient {
-  readonly values = new Map<string, RedisStoredValue>();
-  getCalls = 0;
-  setCalls = 0;
-  getGate: Promise<void> | null = null;
-
-  async get(key: string): Promise<RedisStoredValue | null> {
-    this.getCalls += 1;
-    if (this.getGate !== null) {
-      await this.getGate;
-    }
-    return this.values.get(key) ?? null;
-  }
-
-  async setEx(key: string, _ttlSec: number, value: RedisStoredValue): Promise<void> {
-    this.setCalls += 1;
-    this.values.set(key, value);
-  }
-
-  async del(key: string): Promise<number> {
-    return this.values.delete(key) ? 1 : 0;
-  }
-}
-
 class FailingReadRedis extends FakeRedis {
-  override async get(_key: string): Promise<RedisStoredValue | null> {
-    throw new Error("redis unavailable");
+  constructor() {
+    super();
+    this.failGet = true;
   }
 }
 
@@ -293,6 +271,45 @@ describe("GCache request coalescing", () => {
       { id: "1", calls: 1 },
       { id: "1", calls: 2 },
     ]);
+  });
+
+  it("does not coalesce or touch Redis when configured layers are ramped out", async () => {
+    const gate = deferred<void>();
+    const redis = new FakeRedis();
+    const { metrics, coalesced } = spyMetrics();
+    const gcache = new GCache({ redis: { client: redis }, metrics });
+    let calls = 0;
+    const getUser = gcache.cached(
+      async (id: string) => {
+        const call = ++calls;
+        await gate.promise;
+        return { id, calls: call };
+      },
+      {
+        keyType: "user_id",
+        useCase: "NoCoalesceRampedOut",
+        cacheKey: (id) => id,
+        defaultConfig: new GCacheKeyConfig({
+          ttlSec: { [CacheLayer.LOCAL]: 60, [CacheLayer.REMOTE]: 60 },
+          ramp: { [CacheLayer.LOCAL]: 0, [CacheLayer.REMOTE]: 0 },
+        }),
+      },
+    );
+
+    const inflight = gcache.enable(async () => await Promise.all([getUser("1"), getUser("1")]));
+    await tick();
+    gate.resolve();
+    const results = await inflight;
+
+    expect(calls).toBe(2);
+    expect(results).toEqual([
+      { id: "1", calls: 1 },
+      { id: "1", calls: 2 },
+    ]);
+    expect(coalesced).not.toHaveBeenCalled();
+    expect(redis.getCalls).toBe(0);
+    expect(redis.mGetCalls).toBe(0);
+    expect(redis.setCalls).toBe(0);
   });
 
   it("coalesces Redis read failures after the remote layer is active", async () => {

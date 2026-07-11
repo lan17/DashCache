@@ -7,6 +7,8 @@
   ],
   "scripts": {
     "ts:gcache:build": "pnpm --filter @rungalileo/gcache build",
+    "ts:gcache:test:integration": "pnpm --filter @rungalileo/gcache test:integration",
+    "ts:gcache:test:package": "pnpm --filter @rungalileo/gcache test:package",
     "ts:gcache:test": "pnpm --filter @rungalileo/gcache test",
     "ts:gcache:typecheck": "pnpm --filter @rungalileo/gcache typecheck"
   }

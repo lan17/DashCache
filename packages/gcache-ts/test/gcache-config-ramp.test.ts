@@ -6,29 +6,8 @@ import {
   GCacheKey,
   GCacheKeyConfig,
   deterministicRampSampler,
-  type RedisCommandClient,
-  type RedisStoredValue,
 } from "../src/index.js";
-
-class FakeRedis implements RedisCommandClient {
-  readonly values = new Map<string, RedisStoredValue>();
-  getCalls = 0;
-  setCalls = 0;
-
-  async get(key: string): Promise<RedisStoredValue | null> {
-    this.getCalls += 1;
-    return this.values.get(key) ?? null;
-  }
-
-  async setEx(key: string, _ttlSec: number, value: RedisStoredValue): Promise<void> {
-    this.setCalls += 1;
-    this.values.set(key, value);
-  }
-
-  async del(key: string): Promise<number> {
-    return this.values.delete(key) ? 1 : 0;
-  }
-}
+import { FakeRedis } from "./fake-redis.js";
 
 const configFor = (ttlSec: Partial<Record<CacheLayer, number>>, ramp: Partial<Record<CacheLayer, number>>) =>
   new GCacheKeyConfig({ ttlSec, ramp });

@@ -23,9 +23,7 @@ export type CacheRampSampler = (sample: CacheRampSample) => Awaitable<number>;
 export const deterministicRampSampler: CacheRampSampler = ({ key, layer }) => stablePercent(`${key.urn}:${layer}`);
 export const randomRampSampler: CacheRampSampler = () => Math.random() * 100;
 
-// Watermark TTL must be longer than the longest Redis TTL used by any
-// invalidation-tracked cached function. Otherwise the watermark can expire
-// before older cached values do, allowing stale values to become readable again.
+// Tracked writes extend this floor when their value TTL is longer.
 export const DEFAULT_WATERMARK_TTL_SEC = 3600 * 4;
 
 export class GCacheKeyConfig {
