@@ -310,4 +310,9 @@ Not included yet:
 - Framework middleware helpers/integrations
 - `cachedObject`
 - Expanded examples
-- Release hardening
+
+## Releasing
+
+Publishing is driven by `.github/workflows/release.yaml`. Create a GitHub release whose tag exactly matches `v<package.json version>`; the workflow validates, builds, package-tests, and publishes the public npm package with provenance.
+
+The first publish requires a granular npm token in the repository's `NPM_TOKEN` secret because npm trusted publishing can only be configured after the package exists. After the bootstrap release, configure `lan17/DialCache` and `release.yaml` as the package's trusted GitHub publisher, then remove the long-lived token.
