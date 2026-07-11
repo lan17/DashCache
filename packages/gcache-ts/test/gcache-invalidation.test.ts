@@ -13,6 +13,7 @@ import {
   type GCacheMetricsAdapter,
   type InvalidationMetricLabels,
   type SerializationMetricLabels,
+  type Serializer,
 } from "../src/index.js";
 import { encodeFrame, FakeRedis } from "./fake-redis.js";
 
@@ -156,6 +157,51 @@ describe("GCache targeted invalidation watermarks", () => {
     );
 
     const first = await gcache.enable(async () => await getUser("123"));
+    const second = await gcache.enable(async () => await getUser("123"));
+
+    expect(first).toEqual({ userId: "123", calls: 1 });
+    expect(second).toEqual({ userId: "123", calls: 2 });
+    expect([...redis.values.keys()]).toEqual([watermarkKey]);
+  });
+
+  it("rejects a write when invalidation remains active after slow serialization", async () => {
+    const redis = new FakeRedis();
+    let signalDumpStarted = (): void => undefined;
+    const dumpStarted = new Promise<void>((resolve) => {
+      signalDumpStarted = resolve;
+    });
+    let releaseDump = (): void => undefined;
+    const dumpGate = new Promise<void>((resolve) => {
+      releaseDump = resolve;
+    });
+    const serializer: Serializer<{ userId: string; calls: number }> = {
+      dump: async (value) => {
+        signalDumpStarted();
+        await dumpGate;
+        return JSON.stringify(value);
+      },
+      load: async (value) => {
+        const payload = Buffer.isBuffer(value) ? value.toString("utf8") : value;
+        return JSON.parse(payload) as { userId: string; calls: number };
+      },
+    };
+    const gcache = new GCache({ redis: { client: redis } });
+    let calls = 0;
+    const getUser = gcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
+      keyType: "user_id",
+      useCase: "FutureBufferSerializationRace",
+      cacheKey: (userId) => userId,
+      trackForInvalidation: true,
+      defaultConfig: localAndRemote(),
+      serializer,
+    });
+
+    const pending = gcache.enable(async () => await getUser("123"));
+    await dumpStarted;
+    await gcache.invalidateRemote("user_id", "123", 1_000);
+    vi.advanceTimersByTime(500);
+    releaseDump();
+    const first = await pending;
     const second = await gcache.enable(async () => await getUser("123"));
 
     expect(first).toEqual({ userId: "123", calls: 1 });
