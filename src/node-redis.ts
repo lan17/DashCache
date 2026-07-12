@@ -1,10 +1,10 @@
-import { defineScript } from "redis";
+import { commandOptions, defineScript } from "redis";
 
 import {
   INVALIDATE_CACHE_SCRIPT,
   READ_CACHE_SCRIPT,
   READ_TRACKED_CACHE_SCRIPT,
-  REDIS_ENCODING_BASE64,
+  REDIS_ENCODING_BINARY,
   REDIS_ENCODING_UTF8,
   WRITE_CACHE_SCRIPT,
   WRITE_TRACKED_CACHE_SCRIPT,
@@ -12,8 +12,12 @@ import {
 import { DialCacheRedisPayloadEncodingError, DialCacheRedisPayloadError } from "./redis-client.js";
 import type { DialCacheRedisClient, RedisCachePayload } from "./redis-client.js";
 
+type BufferReplyOptions = ReturnType<typeof commandOptions<{ readonly returnBuffers: true }>>;
+// Redis bulk strings are binary data; decoding them as UTF-8 would corrupt arbitrary serializer output.
+const bufferReplyOptions: BufferReplyOptions = commandOptions({ returnBuffers: true });
 const readReply = (reply: string | null): string | null => reply;
 const integerReply = (reply: number): number => reply;
+type NodeRedisArgument = string | Buffer;
 
 interface NodeRedisScript<Args extends Array<unknown>, Reply> {
   readonly SCRIPT: string;
@@ -21,7 +25,7 @@ interface NodeRedisScript<Args extends Array<unknown>, Reply> {
   readonly NUMBER_OF_KEYS: number;
   readonly FIRST_KEY_INDEX: number;
   readonly IS_READ_ONLY: boolean;
-  transformArguments(...args: Args): Array<string>;
+  transformArguments(...args: Args): Array<NodeRedisArgument>;
   transformReply(reply: Reply): Reply;
 }
 
@@ -37,7 +41,7 @@ export type DialCacheNodeRedisScripts = {
   readonly dialcacheRead: NodeRedisScript<[valueKey: string], string | null>;
   readonly dialcacheReadTracked: NodeRedisScript<[valueKey: string, watermarkKey: string], string | null>;
   readonly dialcacheWrite: NodeRedisScript<
-    [valueKey: string, cacheTtlMs: number, encoding: number, payload: string],
+    [valueKey: string, cacheTtlMs: number, encoding: number, payload: string | Buffer],
     number
   >;
   readonly dialcacheWriteTracked: NodeRedisScript<
@@ -46,7 +50,7 @@ export type DialCacheNodeRedisScripts = {
       watermarkKey: string,
       cacheTtlMs: number,
       encoding: number,
-      payload: string,
+      payload: string | Buffer,
       watermarkTtlFloorMs: number,
     ],
     number
@@ -84,7 +88,12 @@ export const dialcacheRedisScripts: DialCacheNodeRedisScripts = {
     NUMBER_OF_KEYS: 1,
     FIRST_KEY_INDEX: 0,
     IS_READ_ONLY: false,
-    transformArguments(valueKey: string, cacheTtlMs: number, encoding: number, payload: string): Array<string> {
+    transformArguments(
+      valueKey: string,
+      cacheTtlMs: number,
+      encoding: number,
+      payload: string | Buffer,
+    ): Array<NodeRedisArgument> {
       return [valueKey, String(cacheTtlMs), String(encoding), payload];
     },
     transformReply: integerReply,
@@ -99,9 +108,9 @@ export const dialcacheRedisScripts: DialCacheNodeRedisScripts = {
       watermarkKey: string,
       cacheTtlMs: number,
       encoding: number,
-      payload: string,
+      payload: string | Buffer,
       watermarkTtlFloorMs: number,
-    ): Array<string> {
+    ): Array<NodeRedisArgument> {
       return [valueKey, watermarkKey, String(cacheTtlMs), String(encoding), payload, String(watermarkTtlFloorMs)];
     },
     transformReply: integerReply,
@@ -119,15 +128,19 @@ export const dialcacheRedisScripts: DialCacheNodeRedisScripts = {
 };
 
 interface NodeRedisScriptClient {
-  dialcacheRead(valueKey: string): Promise<string | null>;
-  dialcacheReadTracked(valueKey: string, watermarkKey: string): Promise<string | null>;
-  dialcacheWrite(valueKey: string, cacheTtlMs: number, encoding: number, payload: string): Promise<number>;
+  dialcacheRead(options: BufferReplyOptions, valueKey: string): Promise<Buffer | null>;
+  dialcacheReadTracked(
+    options: BufferReplyOptions,
+    valueKey: string,
+    watermarkKey: string,
+  ): Promise<Buffer | null>;
+  dialcacheWrite(valueKey: string, cacheTtlMs: number, encoding: number, payload: string | Buffer): Promise<number>;
   dialcacheWriteTracked(
     valueKey: string,
     watermarkKey: string,
     cacheTtlMs: number,
     encoding: number,
-    payload: string,
+    payload: string | Buffer,
     watermarkTtlFloorMs: number,
   ): Promise<number>;
   dialcacheInvalidate(watermarkKey: string, futureBufferMs: number, watermarkTtlFloorMs: number): Promise<number>;
@@ -143,13 +156,13 @@ export function createNodeRedisDialCacheClient(client: NodeRedisScriptClient): D
   return {
     async read({ valueKey, watermarkKey }) {
       const raw = watermarkKey === undefined
-        ? await client.dialcacheRead(valueKey)
-        : await client.dialcacheReadTracked(valueKey, watermarkKey);
+        ? await client.dialcacheRead(bufferReplyOptions, valueKey)
+        : await client.dialcacheReadTracked(bufferReplyOptions, valueKey, watermarkKey);
       return raw === null ? null : decodePayload(raw);
     },
     async write(request) {
-      const { valueKey, watermarkKey, cacheTtlMs, encoding, value } = request;
-      const encodingByte = encoding === "base64" ? REDIS_ENCODING_BASE64 : REDIS_ENCODING_UTF8;
+      const { valueKey, watermarkKey, cacheTtlMs, value } = request;
+      const encodingByte = Buffer.isBuffer(value) ? REDIS_ENCODING_BINARY : REDIS_ENCODING_UTF8;
       const result = watermarkKey === undefined
         ? await client.dialcacheWrite(valueKey, cacheTtlMs, encodingByte, value)
         : await client.dialcacheWriteTracked(
@@ -187,17 +200,18 @@ export function createNodeRedisDialCacheClient(client: NodeRedisScriptClient): D
   };
 }
 
-function decodePayload(raw: string): RedisCachePayload {
+function decodePayload(raw: Buffer): RedisCachePayload {
   if (raw.length === 0) {
     throw new DialCacheRedisPayloadError("Invalid DialCache Redis payload");
   }
 
-  const encoding = raw.charCodeAt(0);
+  const encoding = raw[0];
+  const payload = raw.subarray(1);
   if (encoding === REDIS_ENCODING_UTF8) {
-    return { encoding: "utf8", value: raw.slice(1) };
+    return payload.toString("utf8");
   }
-  if (encoding === REDIS_ENCODING_BASE64) {
-    return { encoding: "base64", value: raw.slice(1) };
+  if (encoding === REDIS_ENCODING_BINARY) {
+    return payload;
   }
   throw new DialCacheRedisPayloadEncodingError("Invalid DialCache Redis payload encoding");
 }

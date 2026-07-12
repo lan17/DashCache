@@ -1,4 +1,4 @@
-import { createClient } from "redis";
+import { commandOptions, createClient } from "redis";
 import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -24,7 +24,7 @@ const remoteOnly = new DialCacheKeyConfig({
 
 const createTestClient = (url: string) => createClient({ url, scripts: dialcacheRedisScripts });
 
-function encodeFrame(payload: string, encoding: number, createdAtMs = Date.now(), version = 1): Buffer {
+function encodeFrame(payload: string | Buffer, encoding: number, createdAtMs = Date.now(), version = 1): Buffer {
   const timestamp = Buffer.alloc(8);
   timestamp.writeBigUInt64BE(BigInt(createdAtMs));
   return Buffer.concat([Buffer.from([version]), timestamp, Buffer.from([encoding]), Buffer.from(payload)]);
@@ -88,6 +88,48 @@ describe.each(engines)("DialCache Lua protocol on $name", ({ image }) => {
     expect(binaryCalls).toBe(1);
   });
 
+  it("stores arbitrary binary payloads without base64 expansion", async () => {
+    if (client === undefined) {
+      throw new Error("Redis client did not start");
+    }
+    const scriptClient = createNodeRedisDialCacheClient(client);
+    const payloads = [
+      Buffer.alloc(0),
+      Buffer.from(Array.from({ length: 256 }, (_, index) => index)),
+      Buffer.alloc(2 * 1024 * 1024, 0xa5),
+    ];
+
+    for (const [index, payload] of payloads.entries()) {
+      const valueKey = `binary-raw:{item:${index}}:value`;
+      expect(await scriptClient.write({ valueKey, cacheTtlMs: 60_000, value: payload })).toBe(true);
+
+      const roundTrip = await scriptClient.read({ valueKey });
+      const stored = await client.get(commandOptions({ returnBuffers: true }), valueKey);
+
+      expect(Buffer.isBuffer(roundTrip)).toBe(true);
+      expect(roundTrip).toEqual(payload);
+      expect(stored).not.toBeNull();
+      expect(stored?.length).toBe(10 + payload.length);
+      expect(stored?.[0]).toBe(1);
+      expect(stored?.[9]).toBe(1);
+      expect(stored?.subarray(10)).toEqual(payload);
+    }
+
+    const trackedValueKey = "binary-raw:{item:tracked}:value";
+    const watermarkKey = "binary-raw:{item:tracked}:watermark";
+    const trackedPayload = Buffer.from([0, 0xff, 0xc3, 0x28, 0x80]);
+    expect(
+      await scriptClient.write({
+        valueKey: trackedValueKey,
+        watermarkKey,
+        cacheTtlMs: 60_000,
+        value: trackedPayload,
+        watermarkTtlFloorMs: 60_000,
+      }),
+    ).toBe(true);
+    expect(await scriptClient.read({ valueKey: trackedValueKey, watermarkKey })).toEqual(trackedPayload);
+  });
+
   it("recovers every distinct read and write script after SCRIPT FLUSH", async () => {
     if (client === undefined) {
       throw new Error("Redis client did not start");
@@ -101,17 +143,14 @@ describe.each(engines)("DialCache Lua protocol on $name", ({ image }) => {
     await client.scriptFlush();
     expect(await client.dialcacheWrite(valueKey, 60_000, 0, "untracked")).toBe(1);
     await client.scriptFlush();
-    expect(await scriptClient.read({ valueKey })).toEqual({ encoding: "utf8", value: "untracked" });
+    expect(await scriptClient.read({ valueKey })).toBe("untracked");
 
     const trackedValueKey = "script-recovery:{item:tracked}:value";
     const watermarkKey = "script-recovery:{item:tracked}:watermark";
     await client.scriptFlush();
     expect(await client.dialcacheWriteTracked(trackedValueKey, watermarkKey, 60_000, 0, "tracked", 60_000)).toBe(1);
     await client.scriptFlush();
-    expect(await scriptClient.read({ valueKey: trackedValueKey, watermarkKey })).toEqual({
-      encoding: "utf8",
-      value: "tracked",
-    });
+    expect(await scriptClient.read({ valueKey: trackedValueKey, watermarkKey })).toBe("tracked");
   });
 
   it("treats every invalid read frame and watermark state as a miss", async () => {
@@ -143,7 +182,7 @@ describe.each(engines)("DialCache Lua protocol on $name", ({ image }) => {
     expect(await scriptClient.read({ valueKey, watermarkKey })).toBeNull();
 
     await client.set(watermarkKey, "999.5");
-    expect(await scriptClient.read({ valueKey, watermarkKey })).toEqual({ encoding: "utf8", value: "tracked" });
+    expect(await scriptClient.read({ valueKey, watermarkKey })).toBe("tracked");
   });
 
   it("rejects invalid raw script arguments before mutating Redis", async () => {
@@ -285,7 +324,7 @@ describe.each(engines)("DialCache Lua protocol on $name", ({ image }) => {
       await expect(client.dialcacheWriteTracked(valueKey, watermarkKey, 60_000, 0, "replacement", 60_000)).rejects.toThrow(
         "invalid DialCache watermark",
       );
-      expect(await scriptClient.read({ valueKey })).toEqual({ encoding: "utf8", value: "original" });
+      expect(await scriptClient.read({ valueKey })).toBe("original");
     }
   });
 
@@ -431,7 +470,6 @@ describe.each(engines)("DialCache Lua protocol on $name", ({ image }) => {
       valueKey,
       watermarkKey,
       cacheTtlMs: 2_000,
-      encoding: "utf8",
       value: "cached",
       watermarkTtlFloorMs: 1_000,
     });
@@ -439,7 +477,7 @@ describe.each(engines)("DialCache Lua protocol on $name", ({ image }) => {
     expect(wrote).toBe(true);
     expect(await client.get(watermarkKey)).toBe("1.75");
     expect(await client.pTTL(watermarkKey)).toBeGreaterThanOrEqual(61_000);
-    expect(await scriptClient.read({ valueKey, watermarkKey })).toEqual({ encoding: "utf8", value: "cached" });
+    expect(await scriptClient.read({ valueKey, watermarkKey })).toBe("cached");
   });
 
   it("does not rewrite sufficient or persistent watermarks on tracked writes", async () => {
@@ -457,7 +495,6 @@ describe.each(engines)("DialCache Lua protocol on $name", ({ image }) => {
         valueKey: sufficientValueKey,
         watermarkKey: sufficientWatermarkKey,
         cacheTtlMs: 2_000,
-        encoding: "utf8",
         value: "cached",
         watermarkTtlFloorMs: 1_000,
       }),
@@ -476,7 +513,6 @@ describe.each(engines)("DialCache Lua protocol on $name", ({ image }) => {
         valueKey: persistentValueKey,
         watermarkKey: persistentWatermarkKey,
         cacheTtlMs: 2_000,
-        encoding: "utf8",
         value: "cached",
         watermarkTtlFloorMs: 1_000,
       }),
@@ -496,7 +532,6 @@ describe.each(engines)("DialCache Lua protocol on $name", ({ image }) => {
       valueKey,
       watermarkKey,
       cacheTtlMs: 2_000,
-      encoding: "utf8" as const,
       value: "cached",
       watermarkTtlFloorMs: 1_000,
     };
@@ -509,13 +544,13 @@ describe.each(engines)("DialCache Lua protocol on $name", ({ image }) => {
     await scriptClient.invalidate({ watermarkKey, futureBufferMs: 100, watermarkTtlFloorMs: 1_000 });
     expect(await scriptClient.read({ valueKey, watermarkKey })).toBeNull();
     expect(await scriptClient.write({ ...writeRequest, value: "blocked" })).toBe(false);
-    expect(await scriptClient.read({ valueKey })).toEqual({ encoding: "utf8", value: "cached" });
+    expect(await scriptClient.read({ valueKey })).toBe("cached");
     const ttlBeforeRead = await client.pTTL(watermarkKey);
     await scriptClient.read({ valueKey, watermarkKey });
     expect(await client.pTTL(watermarkKey)).toBeLessThanOrEqual(ttlBeforeRead);
 
     await new Promise((resolve) => setTimeout(resolve, 110));
     expect(await scriptClient.write({ ...writeRequest, value: "fresh" })).toBe(true);
-    expect(await scriptClient.read({ valueKey, watermarkKey })).toEqual({ encoding: "utf8", value: "fresh" });
+    expect(await scriptClient.read({ valueKey, watermarkKey })).toBe("fresh");
   });
 });

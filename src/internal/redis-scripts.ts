@@ -1,6 +1,6 @@
 export const REDIS_FRAME_VERSION = 1;
 export const REDIS_ENCODING_UTF8 = 0;
-export const REDIS_ENCODING_BASE64 = 1;
+export const REDIS_ENCODING_BINARY = 1;
 
 const WATERMARK_TTL_MARGIN_MS = 60_000;
 
@@ -39,7 +39,7 @@ local encoding = tonumber(ARGV[2])
 if not cache_ttl_ms or cache_ttl_ms <= 0 then
   return redis.error_reply("ERR invalid DialCache TTL")
 end
-if not encoding or (encoding ~= ${REDIS_ENCODING_UTF8} and encoding ~= ${REDIS_ENCODING_BASE64}) then
+if not encoding or (encoding ~= ${REDIS_ENCODING_UTF8} and encoding ~= ${REDIS_ENCODING_BINARY}) then
   return redis.error_reply("ERR invalid DialCache payload encoding")
 end`;
 

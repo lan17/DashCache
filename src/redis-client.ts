@@ -14,12 +14,8 @@ export class DialCacheRedisPayloadEncodingError extends Error {
   }
 }
 
-export type RedisPayloadEncoding = "utf8" | "base64";
-
-export interface RedisCachePayload {
-  readonly encoding: RedisPayloadEncoding;
-  readonly value: string;
-}
+/** Serialized cache data, independent of any Redis client or wire framing. */
+export type RedisCachePayload = string | Buffer;
 
 interface RedisValueRequest {
   readonly valueKey: string;
@@ -35,8 +31,9 @@ interface UntrackedRedisValueRequest extends RedisValueRequest {
 
 export type RedisReadRequest = TrackedRedisValueRequest | UntrackedRedisValueRequest;
 
-interface RedisWriteBase extends RedisValueRequest, RedisCachePayload {
+interface RedisWriteBase extends RedisValueRequest {
   readonly cacheTtlMs: number;
+  readonly value: RedisCachePayload;
 }
 
 interface TrackedRedisWriteRequest extends RedisWriteBase, TrackedRedisValueRequest {

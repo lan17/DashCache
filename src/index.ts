@@ -31,7 +31,6 @@ export type {
   RedisCachePayload,
   RedisClientFactory,
   RedisInvalidationRequest,
-  RedisPayloadEncoding,
   RedisReadRequest,
   RedisWriteRequest,
 } from "./redis-client.js";

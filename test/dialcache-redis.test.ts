@@ -259,7 +259,7 @@ describe("DialCache Redis TTL layer", () => {
     expect(value).toEqual({ id: "123", source: "fallback" });
     expect(readerCalls).toBe(0);
     expect(frame.encoding).toBe(1);
-    expect(Buffer.from(frame.payload, "base64").toString("utf8")).toBe("123|fallback");
+    expect(frame.payload).toEqual(Buffer.from("123|fallback"));
     expect(serializer.dump).toHaveBeenCalledOnce();
     expect(serializer.load).toHaveBeenCalledOnce();
   });

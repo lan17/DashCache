@@ -4,7 +4,7 @@ import { CacheLayer, DEFAULT_WATERMARK_TTL_SEC, type CacheConfigProvider, type C
 import { invalidationPrefix, redisClusterHashTag, type DialCacheKey } from "../key.js";
 import type { DialCacheMetricsAdapter } from "../metrics.js";
 import { errorName, labelsFor } from "../metrics.js";
-import type { DialCacheRedisClient, RedisCachePayload, RedisClientFactory } from "../redis-client.js";
+import type { DialCacheRedisClient, RedisClientFactory } from "../redis-client.js";
 import { JsonSerializer, type Serializer } from "../serializer.js";
 import type { CacheGetResult } from "./cache-result.js";
 import { fetchKeyConfig, resolveLayerConfigResult, type ResolvedLayerConfig } from "./runtime-config.js";
@@ -87,7 +87,7 @@ export class RedisCache {
 
     const start = performance.now();
     try {
-      const value = (await this.serializerFor(key).load(decodePayload(payload))) as T;
+      const value = (await this.serializerFor(key).load(payload)) as T;
       return { status: "hit", value };
     } catch (error) {
       this.recordMetric((metrics) => metrics.error({ ...labelsFor(key, CacheLayer.REMOTE), error: errorName(error), inFallback: false }));
@@ -120,8 +120,7 @@ export class RedisCache {
     const request = {
       valueKey: this.redisKey(key),
       cacheTtlMs,
-      encoding: Buffer.isBuffer(serialized) ? "base64" : "utf8",
-      value: Buffer.isBuffer(serialized) ? serialized.toString("base64") : serialized,
+      value: serialized,
     } as const;
     return key.trackForInvalidation
       ? await client.write({
@@ -204,10 +203,6 @@ export class RedisCache {
       // Metrics adapters must not affect cache correctness or application fallbacks.
     }
   }
-}
-
-function decodePayload(payload: RedisCachePayload): string | Buffer {
-  return payload.encoding === "base64" ? Buffer.from(payload.value, "base64") : payload.value;
 }
 
 function payloadSize(payload: string | Buffer): number {

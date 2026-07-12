@@ -90,18 +90,18 @@ const dialcache = new DialCache({
 });
 ```
 
-The core Redis boundary is the client-agnostic `DialCacheRedisClient` interface. Other clients can implement that semantic interface without changing DialCache; distinct untracked/tracked read and write Lua sources, the invalidation source, and wire constants are available from `dialcache/redis-protocol`, so a Valkey GLIDE adapter can be added without depending on node-redis. Custom adapters can use the root-exported `DialCacheRedisPayloadError` and `DialCacheRedisPayloadEncodingError` classes to preserve the standard metrics labels.
+The core Redis boundary is the client-agnostic `DialCacheRedisClient` interface. It exchanges serialized values as `string | Buffer` and does not expose node-redis commands or wire encodings. Other clients can implement that semantic interface without changing DialCache; distinct untracked/tracked read and write Lua sources, the invalidation source, and wire constants are available from `dialcache/redis-protocol`, so a Valkey GLIDE adapter can use its own script lifecycle, cluster routing, and byte decoder without depending on node-redis. Custom adapters can use the root-exported `DialCacheRedisPayloadError` and `DialCacheRedisPayloadEncodingError` classes to preserve the standard metrics labels.
 
 Redis values use a compact binary frame:
 
 ```text
 byte 1      format version
 bytes 2-9   Redis-created timestamp in milliseconds (uint64, big-endian)
-byte 10     payload encoding (0 = UTF-8, 1 = base64)
+byte 10     payload encoding (0 = UTF-8, 1 = raw binary)
 bytes 11... serialized payload
 ```
 
-Redis's Lua `struct` library packs and unpacks the timestamp. Redis TTL is authoritative, so expiry metadata is not duplicated in the frame. `payload` is produced by the cached function's serializer, or by `JsonSerializer` by default. Custom serializers can return either `string` or `Buffer`; Buffer payloads are base64 encoded and reconstructed before `serializer.load`.
+Redis's Lua `struct` library packs and unpacks the timestamp. Redis TTL is authoritative, so expiry metadata is not duplicated in the frame. `payload` is produced by the cached function's serializer, or by `JsonSerializer` by default. Custom serializers can return either `string` or `Buffer`; strings are stored as UTF-8 and Buffers are stored byte-for-byte without base64 expansion. Adapters restore the same representation before calling `serializer.load`.
 
 ## Targeted invalidation and watermarks
 

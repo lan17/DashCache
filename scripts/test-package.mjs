@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 const exec = promisify(execFile);
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const workspace = await mkdtemp(join(tmpdir(), "dialcache-package-"));
-const consumer = `import { DialCache, DialCacheKeyConfig } from "dialcache";
+const consumer = `import { DialCache, DialCacheKeyConfig, type DialCacheRedisClient } from "dialcache";
 import { createNodeRedisDialCacheClient } from "dialcache/node-redis";
 import { READ_CACHE_SCRIPT } from "dialcache/redis-protocol";
 
@@ -23,6 +23,14 @@ const load = cache.cached(async (id: string) => id, {
 void load;
 void createNodeRedisDialCacheClient;
 void READ_CACHE_SCRIPT;
+
+const customRedisClient: DialCacheRedisClient = {
+  read: async () => Buffer.from([0, 255]),
+  write: async ({ value }) => typeof value === "string" || Buffer.isBuffer(value),
+  invalidate: async () => undefined,
+  flushAll: async () => undefined,
+};
+void customRedisClient;
 `;
 
 try {

@@ -44,7 +44,6 @@ export class FakeRedis implements DialCacheRedisClient {
     valueKey,
     watermarkKey,
     cacheTtlMs,
-    encoding,
     value,
     watermarkTtlFloorMs,
   }: RedisWriteRequest): Promise<boolean> {
@@ -55,14 +54,14 @@ export class FakeRedis implements DialCacheRedisClient {
       if (watermark >= Date.now()) {
         return false;
       }
-      this.storeFrame(valueKey, cacheTtlMs, encoding, value);
+      this.storeFrame(valueKey, cacheTtlMs, value);
       const currentTtlMs = this.remainingTtlMs(watermarkKey);
       const desiredTtlMs = Math.max(currentTtlMs, watermarkTtlFloorMs, cacheTtlMs + WATERMARK_TTL_MARGIN_MS);
       this.storeWatermark(watermarkKey, watermark, desiredTtlMs);
       return true;
     }
 
-    this.storeFrame(valueKey, cacheTtlMs, encoding, value);
+    this.storeFrame(valueKey, cacheTtlMs, value);
     return true;
   }
 
@@ -155,22 +154,22 @@ export class FakeRedis implements DialCacheRedisClient {
 
     const encoding = raw[ENCODING_OFFSET];
     if (encoding === 0) {
-      return { encoding: "utf8", value: raw.subarray(PAYLOAD_OFFSET).toString("utf8") };
+      return raw.subarray(PAYLOAD_OFFSET).toString("utf8");
     }
     if (encoding === 1) {
-      return { encoding: "base64", value: raw.subarray(PAYLOAD_OFFSET).toString("utf8") };
+      return raw.subarray(PAYLOAD_OFFSET);
     }
     throw new DialCacheRedisPayloadEncodingError("Invalid DialCache Redis payload encoding");
   }
 
-  private storeFrame(key: string, ttlMs: number, encoding: "utf8" | "base64", payload: string): void {
+  private storeFrame(key: string, ttlMs: number, payload: RedisCachePayload): void {
     const timestamp = Buffer.alloc(8);
     timestamp.writeBigUInt64BE(BigInt(Date.now()));
     this.values.set(key, {
       value: Buffer.concat([
         Buffer.from([FRAME_VERSION]),
         timestamp,
-        Buffer.from([encoding === "base64" ? 1 : 0]),
+        Buffer.from([Buffer.isBuffer(payload) ? 1 : 0]),
         Buffer.from(payload),
       ]),
       expiresAtMs: Date.now() + ttlMs,
@@ -221,18 +220,24 @@ export class FakeRedis implements DialCacheRedisClient {
 export function encodeFrame(value: unknown, createdAtMs = Date.now(), encoding = 0): Buffer {
   const timestamp = Buffer.alloc(8);
   timestamp.writeBigUInt64BE(BigInt(createdAtMs));
-  const payload = typeof value === "string" ? value : JSON.stringify(value);
-  return Buffer.concat([Buffer.from([FRAME_VERSION]), timestamp, Buffer.from([encoding]), Buffer.from(payload)]);
+  const payload = Buffer.isBuffer(value)
+    ? value
+    : Buffer.from(typeof value === "string" ? value : JSON.stringify(value));
+  return Buffer.concat([Buffer.from([FRAME_VERSION]), timestamp, Buffer.from([encoding]), payload]);
 }
 
-export function decodeFrame(raw: Buffer): { readonly createdAtMs: number; readonly encoding: number; readonly payload: string } {
+export function decodeFrame(
+  raw: Buffer,
+): { readonly createdAtMs: number; readonly encoding: number; readonly payload: string | Buffer } {
   if (raw.length < PAYLOAD_OFFSET || raw[0] !== FRAME_VERSION) {
     throw new Error("Invalid DialCache frame");
   }
+  const encoding = raw[ENCODING_OFFSET] ?? -1;
+  const payload = raw.subarray(PAYLOAD_OFFSET);
   return {
     createdAtMs: Number(readTimestamp(raw)),
-    encoding: raw[ENCODING_OFFSET] ?? -1,
-    payload: raw.subarray(PAYLOAD_OFFSET).toString("utf8"),
+    encoding,
+    payload: encoding === 0 ? payload.toString("utf8") : payload,
   };
 }
 
