@@ -6,8 +6,10 @@ Fine-grained TypeScript caching with explicit enabled contexts, stable key const
 
 ```bash
 pnpm add dialcache
-# For Redis-backed caching:
+# Choose a Redis client when using the remote layer:
 pnpm add redis@~4.7.1
+# or
+pnpm add @valkey/valkey-glide@^2.4.2
 ```
 
 DialCache requires Node.js 20 or Node.js 22 and newer.
@@ -61,6 +63,30 @@ const dialcache = new DialCache({
 
 The `redis.client` and `redis.createClient` options accept the semantic `DialCacheRedisClient` interface. Node-redis users should register the supplied scripts and wrap their client with `createNodeRedisDialCacheClient` as shown above.
 
+Valkey GLIDE users pass an already-created standalone or cluster client to the GLIDE adapter:
+
+```ts
+import { GlideClient } from "@valkey/valkey-glide";
+import { DialCache } from "dialcache";
+import { createValkeyGlideDialCacheClient } from "dialcache/valkey-glide";
+
+const glideClient = await GlideClient.createClient({
+  addresses: [{ host: "127.0.0.1", port: 6379 }],
+});
+const redisClient = createValkeyGlideDialCacheClient(glideClient);
+const dialcache = new DialCache({
+  redis: { client: redisClient, keyPrefix: "dialcache:" },
+});
+
+function shutdown(): void {
+  // Release adapter-owned scripts before closing GLIDE.
+  redisClient.dispose();
+  glideClient.close();
+}
+```
+
+DialCache does not create, connect, or close the underlying Redis client. After outstanding cache operations finish, the GLIDE adapter's `dispose()` method releases its five native `Script` handles; it is idempotent and does not close the wrapped GLIDE connection.
+
 When caching is enabled, reads flow through:
 
 ```text
@@ -81,7 +107,7 @@ const dialcache = new DialCache({ localMaxSize: 25_000 });
 
 The limit counts entries rather than estimating JavaScript object memory. Recently read entries stay resident ahead of less recently used entries when the limit is reached.
 
-Node-redis computes each script's SHA, uses `EVALSHA`, and retries with `EVAL` after `NOSCRIPT`. Its cluster client routes scripts by their first key and performs that fallback on the selected shard. Tracked reads are deliberately routed to primaries so a lagging Redis replica cannot hide an invalidation watermark. The adapter also fans `flushAll()` across every cluster master instead of silently clearing one shard.
+Node-redis computes each script's SHA, uses `EVALSHA`, and retries with `EVAL` after `NOSCRIPT`. Its cluster client routes scripts by their first key and performs that fallback on the selected shard. The GLIDE adapter uses GLIDE's native `Script` lifecycle and byte decoder; GLIDE routes scripts from their declared keys and the adapter broadcasts `flushAll()` to all cluster primaries. Tracked reads are deliberately routed to primaries so a lagging replica cannot hide an invalidation watermark.
 
 You can also provide a lazy factory that returns a script-enabled client:
 
@@ -100,7 +126,7 @@ const dialcache = new DialCache({
 });
 ```
 
-The core Redis boundary is the client-agnostic `DialCacheRedisClient` interface. It exchanges serialized values as `string | Buffer` and does not expose node-redis commands or wire encodings. Other clients can implement that semantic interface without changing DialCache; distinct untracked/tracked read and write Lua sources, the invalidation source, and wire constants are available from `dialcache/redis-protocol`, so a Valkey GLIDE adapter can use its own script lifecycle, cluster routing, and byte decoder without depending on node-redis. Custom adapters can use the root-exported `DialCacheRedisPayloadError` and `DialCacheRedisPayloadEncodingError` classes to preserve the standard metrics labels.
+The core Redis boundary is the client-agnostic `DialCacheRedisClient` interface. It exchanges serialized values as `string | Buffer` and does not expose client commands or wire encodings. Distinct untracked/tracked read and write Lua sources, the invalidation source, and wire constants are available from `dialcache/redis-protocol`. Custom adapters can use the root-exported `DialCacheRedisPayloadError` and `DialCacheRedisPayloadEncodingError` classes to preserve the standard metrics labels.
 
 Redis values use a compact binary frame:
 
@@ -294,6 +320,7 @@ Included:
 - Lua-backed Redis reads and writes with Redis-generated timestamps
 - Versioned binary Redis frames for UTF-8 and Buffer serializer output
 - Native node-redis script registration with automatic `NOSCRIPT` recovery
+- Native Valkey GLIDE adapter with explicit script disposal and automatic script-cache recovery
 - Standalone Redis, Valkey, and Redis Cluster support
 - JSON and custom serializer support for Redis values
 - Duplicate and reserved use-case validation

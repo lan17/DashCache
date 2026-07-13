@@ -4,13 +4,11 @@ import {
   INVALIDATE_CACHE_SCRIPT,
   READ_CACHE_SCRIPT,
   READ_TRACKED_CACHE_SCRIPT,
-  REDIS_ENCODING_BINARY,
-  REDIS_ENCODING_UTF8,
   WRITE_CACHE_SCRIPT,
   WRITE_TRACKED_CACHE_SCRIPT,
 } from "./internal/redis-scripts.js";
-import { DialCacheRedisPayloadEncodingError, DialCacheRedisPayloadError } from "./redis-client.js";
-import type { DialCacheRedisClient, RedisCachePayload } from "./redis-client.js";
+import { decodeRedisPayload, redisPayloadEncoding } from "./internal/redis-payload.js";
+import type { DialCacheRedisClient } from "./redis-client.js";
 
 type BufferReplyOptions = ReturnType<typeof commandOptions<{ readonly returnBuffers: true }>>;
 // Redis bulk strings are binary data; decoding them as UTF-8 would corrupt arbitrary serializer output.
@@ -158,11 +156,11 @@ export function createNodeRedisDialCacheClient(client: NodeRedisScriptClient): D
       const raw = watermarkKey === undefined
         ? await client.dialcacheRead(bufferReplyOptions, valueKey)
         : await client.dialcacheReadTracked(bufferReplyOptions, valueKey, watermarkKey);
-      return raw === null ? null : decodePayload(raw);
+      return raw === null ? null : decodeRedisPayload(raw);
     },
     async write(request) {
       const { valueKey, watermarkKey, cacheTtlMs, value } = request;
-      const encodingByte = Buffer.isBuffer(value) ? REDIS_ENCODING_BINARY : REDIS_ENCODING_UTF8;
+      const encodingByte = redisPayloadEncoding(value);
       const result = watermarkKey === undefined
         ? await client.dialcacheWrite(valueKey, cacheTtlMs, encodingByte, value)
         : await client.dialcacheWriteTracked(
@@ -198,22 +196,6 @@ export function createNodeRedisDialCacheClient(client: NodeRedisScriptClient): D
       );
     },
   };
-}
-
-function decodePayload(raw: Buffer): RedisCachePayload {
-  if (raw.length === 0) {
-    throw new DialCacheRedisPayloadError("Invalid DialCache Redis payload");
-  }
-
-  const encoding = raw[0];
-  const payload = raw.subarray(1);
-  if (encoding === REDIS_ENCODING_UTF8) {
-    return payload.toString("utf8");
-  }
-  if (encoding === REDIS_ENCODING_BINARY) {
-    return payload;
-  }
-  throw new DialCacheRedisPayloadEncodingError("Invalid DialCache Redis payload encoding");
 }
 
 function clusterCommands(client: NodeRedisScriptClient): NodeRedisClusterCommands | null {

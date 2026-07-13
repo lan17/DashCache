@@ -11,6 +11,7 @@ const workspace = await mkdtemp(join(tmpdir(), "dialcache-package-"));
 const consumer = `import { DialCache, DialCacheKeyConfig, type DialCacheRedisClient } from "dialcache";
 import { createNodeRedisDialCacheClient } from "dialcache/node-redis";
 import { READ_CACHE_SCRIPT } from "dialcache/redis-protocol";
+import { createValkeyGlideDialCacheClient, type ValkeyGlideDialCacheClient } from "dialcache/valkey-glide";
 
 const cache = new DialCache();
 const load = cache.cached(async (id: string) => id, {
@@ -22,6 +23,7 @@ const load = cache.cached(async (id: string) => id, {
 
 void load;
 void createNodeRedisDialCacheClient;
+void createValkeyGlideDialCacheClient;
 void READ_CACHE_SCRIPT;
 
 const customRedisClient: DialCacheRedisClient = {
@@ -31,6 +33,8 @@ const customRedisClient: DialCacheRedisClient = {
   flushAll: async () => undefined,
 };
 void customRedisClient;
+const glideRedisClient: ValkeyGlideDialCacheClient | undefined = undefined;
+void glideRedisClient;
 `;
 
 try {
@@ -50,6 +54,47 @@ try {
       join(workspace, tarball),
       "redis@~4.7.1",
       "typescript@5.9.3",
+    ],
+    { cwd: workspace },
+  );
+
+  let glideWasInstalled = false;
+  try {
+    await exec(process.execPath, ["--eval", "require.resolve('@valkey/valkey-glide')"], { cwd: workspace });
+    glideWasInstalled = true;
+  } catch {
+    // Optional peers remain absent until the consumer selects the corresponding adapter.
+  }
+  if (glideWasInstalled) {
+    throw new Error("The optional Valkey GLIDE peer was installed automatically");
+  }
+
+  await exec(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      "await import('dialcache'); await import('dialcache/redis-protocol'); await import('dialcache/node-redis')",
+    ],
+    { cwd: workspace },
+  );
+  await exec(
+    process.execPath,
+    ["--eval", "require('dialcache'); require('dialcache/redis-protocol'); require('dialcache/node-redis')"],
+    { cwd: workspace },
+  );
+
+  await exec(
+    "npm",
+    [
+      "install",
+      "--ignore-scripts",
+      "--no-package-lock",
+      "--no-save",
+      join(workspace, tarball),
+      "redis@~4.7.1",
+      "typescript@5.9.3",
+      "@valkey/valkey-glide@^2.4.2",
     ],
     { cwd: workspace },
   );
@@ -80,13 +125,16 @@ try {
     [
       "--input-type=module",
       "--eval",
-      "await import('dialcache'); await import('dialcache/redis-protocol'); await import('dialcache/node-redis')",
+      "await import('dialcache'); await import('dialcache/redis-protocol'); await import('dialcache/node-redis'); await import('dialcache/valkey-glide')",
     ],
     { cwd: workspace },
   );
   await exec(
     process.execPath,
-    ["--eval", "require('dialcache'); require('dialcache/redis-protocol'); require('dialcache/node-redis')"],
+    [
+      "--eval",
+      "require('dialcache'); require('dialcache/redis-protocol'); require('dialcache/node-redis'); require('dialcache/valkey-glide')",
+    ],
     { cwd: workspace },
   );
   await exec(
