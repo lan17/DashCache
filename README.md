@@ -350,6 +350,8 @@ Not included yet:
 
 ## Releasing
 
-Publishing is driven by `.github/workflows/release.yaml`. Create a GitHub release whose tag exactly matches `v<package.json version>`; the workflow validates, builds, package-tests, and publishes the public npm package with provenance.
+Publishing is driven manually from the `Release` workflow in GitHub Actions. Run it from `main`; the workflow rejects any other ref or a stale main commit. It calculates the next patch version from the highest stable `vX.Y.Z` tag, using the `package.json` version as the seed when no release tag exists. For example, the current `0.1.0` seed produces the first `v0.1.1` release, followed by `v0.1.2`.
+
+Every release is a patch bump. Semantic PR-title prefixes such as `feat:`, `fix:`, and `docs:` remain in the generated release notes but do not change the version magnitude. After validating, building, and package-testing the release artifact, the workflow creates a draft GitHub release, publishes the public npm package with provenance, and publishes the GitHub release only after npm succeeds.
 
 The first publish requires a granular npm token in the repository's `NPM_TOKEN` secret because npm trusted publishing can only be configured after the package exists. After the bootstrap release, configure `lan17/DialCache` and `release.yaml` as the package's trusted GitHub publisher, then remove the long-lived token.
