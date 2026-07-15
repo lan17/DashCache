@@ -37,7 +37,6 @@ test/                   # Unit and Redis integration tests
 - Keep Redis client-specific behavior in adapters; core code depends on `DialCacheRedisClient`.
 - Public exports belong in `src/index.ts`, `src/node-redis.ts`, or `src/redis-protocol.ts`.
 - Use `corepack pnpm` for project commands.
-- Every Codex commit subject must start with `codex: `.
 
 ## Validation
 
