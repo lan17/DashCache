@@ -257,9 +257,9 @@ const dialcache = new DialCache({
 DialCache coalesces in-flight work at the lifetime of the first active cache layer:
 
 - When request-local caching is enabled, same-key callers in one outermost `enable()` scope share request-scoped in-flight work before the request-local lookup. Its resolved value is then memoized for later sequential calls in that scope.
-- When process-local or Redis caching is enabled, same-key callers share process-scoped in-flight cache work before the first active shared layer. This still applies when request-local caching is off and can combine leaders from separate request scopes.
+- When process-local or Redis caching is enabled, same-key callers share in-flight work within one `DialCache` instance before the first active shared layer. This is reported as `scope="process"`, still applies when request-local caching is off, and can combine leaders from separate request scopes using the same instance.
 
-With Redis configured, a process-scoped leader that misses the process-local cache runs the Redis read and, on miss, the fallback/cache write; followers await that result. Process-local-only misses share the leader's fallback/cache write. This protects Redis and the source of truth from a thundering herd on hot keys.
+With Redis configured, an instance-scoped leader that misses the process-local cache runs the Redis read and, on miss, the fallback/cache write; followers await that result. Process-local-only misses share the leader's fallback/cache write. This protects Redis and the source of truth from a thundering herd on hot keys.
 
 Coalescing only applies when at least one cache layer is active. Calls outside `enable()` are true pass-through, and calls where request-local, process-local, and Redis are all disabled are true pass-through.
 
@@ -356,7 +356,7 @@ DialCache registers Prometheus metrics by default via `prom-client`:
 | `dialcache_serialization_timer` | Histogram | `use_case`, `key_type`, `layer`, `operation` | Redis serializer dump/load latency |
 | `dialcache_size_histogram` | Histogram | `use_case`, `key_type`, `layer` | Serialized Redis payload size in bytes |
 
-The `layer` label is `request_local`, `local` (process-local), or `remote`. Disabled-context, key-construction, and config-provider failures use `noop` because no cache layer was reached. The bounded `scope` label on `dialcache_coalesced_counter` distinguishes request-local from process-wide single-flight work.
+The `layer` label is `request_local`, `local` (process-local), or `remote`. Disabled-context, key-construction, and config-provider failures use `noop` because no cache layer was reached. The bounded `scope` label on `dialcache_coalesced_counter` distinguishes request-local from instance-scoped single-flight work. `scope="process"` coordinates calls only within one `DialCache` instance; separate instances in the same process do not share in-flight state.
 
 Use a custom registry or prefix when embedding DialCache in an app with its own metrics endpoint:
 
@@ -408,7 +408,7 @@ Included:
 - Redis Cluster hash-tagged value/watermark keys for invalidation-tracked entries
 - Dynamically extended watermark TTL with a configurable `DEFAULT_WATERMARK_TTL_SEC` floor
 - Future-buffer behavior that avoids cache writes during active invalidation windows
-- Request-scoped and process-scoped coalescing for active cache work
+- Request-scoped and instance-scoped coalescing for active cache work
 
 Not included yet:
 
@@ -424,7 +424,7 @@ From a repository checkout, run the semantic microbenchmark after installing dep
 pnpm benchmark:request-local
 ```
 
-The command builds `dist` before reporting request-local sequential-hit throughput plus request-local and process-wide coalescing fan-out. The benchmark is a maintainer tool and is not included in the published package. It asserts fallback counts and returned values but deliberately applies no timing threshold. Override its work sizes with `DIALCACHE_BENCH_ITERATIONS` and `DIALCACHE_BENCH_FANOUT`.
+The command builds `dist` before reporting request-local sequential-hit throughput plus request-local and instance-scoped coalescing fan-out. The benchmark is a maintainer tool and is not included in the published package. It asserts fallback counts and returned values but deliberately applies no timing threshold. Override its work sizes with `DIALCACHE_BENCH_ITERATIONS` and `DIALCACHE_BENCH_FANOUT`.
 
 ## Releasing
 
