@@ -15,6 +15,8 @@ pnpm add redis@~4.7.1
 pnpm add @valkey/valkey-glide@^2.4.2
 # Add a metrics client only when using its adapter:
 pnpm add prom-client@^15.1.3
+# or
+pnpm add hot-shots@^17.0.0
 ```
 
 DialCache requires Node.js 20 or Node.js 22 and newer.
@@ -423,6 +425,60 @@ The Prometheus adapter emits:
 
 The `layer` label is `request_local`, `local` (process-local), or `remote`. Disabled-context, key-construction, and config-provider failures use `noop` because no cache layer was reached. The bounded `scope` label on `dialcache_coalesced_counter` distinguishes request-local from instance-scoped single-flight work. `scope="process"` coordinates calls only within one `DialCache` instance; separate instances in the same process do not share in-flight state.
 
+### Datadog
+
+Install `hot-shots` separately, create the DogStatsD client your application owns, and pass it to the Datadog adapter:
+
+```bash
+pnpm add hot-shots@^17.0.0
+```
+
+```ts
+import StatsD from "hot-shots";
+import { DialCache } from "dialcache";
+import { createDatadogDialCacheMetrics } from "dialcache/datadog";
+
+const dogStatsD = new StatsD({
+  host: process.env.DD_AGENT_HOST,
+  globalTags: { service: "users-api", env: process.env.DD_ENV ?? "development" },
+  errorHandler: (error) => logger.warn("DogStatsD error", { error }),
+});
+
+const dialcache = new DialCache({
+  metrics: createDatadogDialCacheMetrics({
+    client: dogStatsD,
+    observationMetricType: "distribution",
+    namespace: "dialcache",
+  }),
+});
+
+// After outstanding cache operations finish during application shutdown:
+dogStatsD.close();
+```
+
+`hot-shots` is the supported and tested client, but the adapter depends only on the exported `DatadogDogStatsDClient` structural interface. DialCache does not import or install `hot-shots`, create a client, flush buffers, close sockets, or otherwise own the client lifecycle.
+
+`observationMetricType` is required. `"distribution"` is recommended when latency and size percentiles must aggregate across hosts; enable the desired distribution percentiles and aggregations in Datadog. Choose `"histogram"` when host-level histogram aggregation matches your existing Datadog setup. The choice applies uniformly to all four duration/size metrics. Both modes produce Datadog custom metrics. Distribution volume scales with unique tag-value combinations: Datadog counts five baseline aggregations per combination, and enabling percentile aggregations adds five more. Review [Datadog's custom-metrics billing guidance](https://docs.datadoghq.com/account_management/billing/custom_metrics/) before rollout. Do not send both types under the same namespace: when changing types, use a new namespace during migration so one metric identity never mixes histogram and distribution points.
+
+The namespace defaults to `dialcache`. It must start with a letter and contain only letters, numbers, underscores, and dot-separated non-empty segments. The adapter rejects invalid namespaces and final metric names longer than 200 characters rather than relying on client-side normalization. A `hot-shots` `prefix` is applied after the adapter constructs the name, so include that prefix when checking the final length and avoid combining it with `namespace` accidentally. Client-level `globalTags` are appended by `hot-shots`; the table below lists the tags added by the adapter.
+
+The Datadog adapter emits exact increments of `1` for counters and preserves seconds and bytes without unit conversion:
+
+| Metric | Type | Tags | Description |
+| --- | --- | --- | --- |
+| `dialcache.request.count` | Count | `use_case`, `key_type`, `layer` | Cache-layer requests that reached an enabled layer |
+| `dialcache.miss.count` | Count | `use_case`, `key_type`, `layer` | Cache misses |
+| `dialcache.disabled.count` | Count | `use_case`, `key_type`, `layer`, `reason` | Cache skips by bounded reason |
+| `dialcache.error.count` | Count | `use_case`, `key_type`, `layer`, `error`, `in_fallback` | Cache/fallback errors by bounded failure site |
+| `dialcache.invalidation.count` | Count | `key_type`, `layer` | Invalidation calls for the layers touched |
+| `dialcache.coalesced.count` | Count | `use_case`, `key_type`, `scope` | Coalesced requests by sharing scope |
+| `dialcache.get.duration` | Distribution or histogram | `use_case`, `key_type`, `layer` | Cache get latency in seconds |
+| `dialcache.fallback.duration` | Distribution or histogram | `use_case`, `key_type`, `layer` | Time spent in the underlying function in seconds |
+| `dialcache.serialization.duration` | Distribution or histogram | `use_case`, `key_type`, `layer`, `operation` | Redis serializer dump/load latency in seconds |
+| `dialcache.serialization.size` | Distribution or histogram | `use_case`, `key_type`, `layer` | Serialized Redis payload size in bytes |
+
+Synchronous client throws are isolated by DialCache's fail-open metrics boundary. Buffered transport failures happen outside that synchronous call, so configure the DogStatsD client's error handling and shutdown behavior as part of application ownership.
+
 ### Error categories
 
 The `error` label reports where an operation failed rather than copying the thrown value's class or `Error.name`:
@@ -478,6 +534,7 @@ Included:
 - Deterministic default ramp sampler with injectable override hooks
 - Missing config disables only the relevant layer and falls through
 - Optional Prometheus adapter with caller-owned registries and duplicate-registration safety
+- Optional Datadog DogStatsD adapter with caller-owned clients and explicit distribution/histogram semantics
 - Backend-neutral custom metrics adapter hook; metrics are disabled when omitted
 - Cache-vs-fallback error classification through the `in_fallback` label
 - Serialization latency and cached payload size metrics for Redis values
