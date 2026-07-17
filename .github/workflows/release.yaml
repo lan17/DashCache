@@ -25,10 +25,8 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
-          registry-url: "https://registry.npmjs.org"
           package-manager-cache: false
-      - name: Verify release source and resolve version
-        id: release
+      - name: Verify release source
         run: |
           if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
             echo "Release workflow must be run from main; got $GITHUB_REF" >&2
@@ -41,41 +39,13 @@ jobs:
             echo "Release source $GITHUB_SHA is not current origin/main $remote_main" >&2
             exit 1
           fi
-
-          version="$(node scripts/release-version.mjs)"
-          tag="v$version"
-          if git show-ref --verify --quiet "refs/tags/$tag"; then
-            echo "Release tag $tag already exists" >&2
-            exit 1
-          fi
-
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "Releasing dialcache@$version from $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
-      - run: pnpm test:release
       - run: pnpm install --frozen-lockfile
-      - name: Stamp release version
+      - run: pnpm check
+      - name: Semantic Release
+        uses: cycjimmy/semantic-release-action@v6.0.0
+        with:
+          semantic_version: 25.0.7
+          extra_plugins: conventional-changelog-conventionalcommits@9.3.1
         env:
-          RELEASE_VERSION: ${{ steps.release.outputs.version }}
-        run: npm version "$RELEASE_VERSION" --no-git-tag-version --allow-same-version
-      - run: pnpm typecheck
-      - run: pnpm test
-      - run: pnpm build
-      - run: pnpm test:package
-      - name: Create draft GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.release.outputs.tag }}
-        run: gh release create "$RELEASE_TAG" --draft --generate-notes --target "$GITHUB_SHA" --title "$RELEASE_TAG"
-      - name: Publish to npm
-        run: npm publish --provenance --access public
-        env:
-          # Required only for the first publish. Once dialcache exists on npm,
-          # configure release.yaml as its trusted GitHub publisher and remove
-          # this secret; npm will then use the workflow's OIDC token.
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - name: Publish GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.release.outputs.tag }}
-        run: gh release edit "$RELEASE_TAG" --draft=false --latest
+          GITHUB_TOKEN: ${{ github.token }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
