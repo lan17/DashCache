@@ -25,6 +25,13 @@ const rootConsumer = `import {
 } from "dialcache";
 import { createNodeRedisDialCacheClient } from "dialcache/node-redis";
 import { READ_CACHE_SCRIPT } from "dialcache/redis-protocol";
+import {
+  DatadogDialCacheMetrics,
+  createDatadogDialCacheMetrics,
+  type DatadogDogStatsDClient,
+  type DatadogMetricsOptions,
+  type DatadogObservationMetricType,
+} from "dialcache/datadog";
 
 const optionsFor = (useCase: string) => ({
   keyType: "id",
@@ -42,6 +49,20 @@ const metrics: DialCacheMetricsAdapter = {
   observeSerialization: () => undefined,
   observeSize: () => undefined,
 };
+const dogStatsDClient: DatadogDogStatsDClient = {
+  increment: () => undefined,
+  histogram: () => undefined,
+  distribution: () => undefined,
+};
+const datadogObservationMetricType: DatadogObservationMetricType = "distribution";
+const datadogOptions: DatadogMetricsOptions = {
+  client: dogStatsDClient,
+  observationMetricType: datadogObservationMetricType,
+};
+const datadogMetrics = createDatadogDialCacheMetrics(datadogOptions);
+const datadogClassAdapter = new DatadogDialCacheMetrics(datadogOptions);
+// @ts-expect-error The observation type is an explicit, required choice.
+const missingObservationType: DatadogMetricsOptions = { client: dogStatsDClient };
 const cache = new DialCache({ metrics });
 const load = cache.cached(async (id: string) => id, {
   keyType: "id",
@@ -154,6 +175,7 @@ const configHasNoMetricsPrefix: "metricsPrefix" extends keyof DialCacheConfig ? 
 const configRejectsFalseMetrics: false extends NonNullable<DialCacheConfig["metrics"]> ? false : true = true;
 type DialCacheRoot = typeof import("dialcache");
 const rootHasNoPrometheusFactory: "createPrometheusDialCacheMetrics" extends keyof DialCacheRoot ? false : true = true;
+const rootHasNoDatadogFactory: "createDatadogDialCacheMetrics" extends keyof DialCacheRoot ? false : true = true;
 
 void load;
 void loadJsonRecord;
@@ -189,8 +211,20 @@ void configHasNoMetricsRegistry;
 void configHasNoMetricsPrefix;
 void configRejectsFalseMetrics;
 void rootHasNoPrometheusFactory;
+void rootHasNoDatadogFactory;
+void datadogMetrics;
+void datadogClassAdapter;
+void missingObservationType;
 `;
 const integrationConsumer = `import { DialCache } from "dialcache";
+import StatsD from "hot-shots";
+import {
+  DatadogDialCacheMetrics,
+  createDatadogDialCacheMetrics,
+  type DatadogDogStatsDClient,
+  type DatadogMetricsOptions,
+  type DatadogObservationMetricType,
+} from "dialcache/datadog";
 import {
   PrometheusDialCacheMetrics,
   createPrometheusDialCacheMetrics,
@@ -212,6 +246,22 @@ openMetricsRegistry.setContentType(Registry.OPENMETRICS_CONTENT_TYPE);
 const openMetricsAdapter = new PrometheusDialCacheMetrics({ registry: openMetricsRegistry, prefix: "open_" });
 const registryIsRequired: {} extends Pick<PrometheusMetricsOptions, "registry"> ? false : true = true;
 const glideRedisClient: ValkeyGlideDialCacheClient | undefined = undefined;
+const dogStatsD = new StatsD({ mock: true });
+const compatibleDogStatsD: DatadogDogStatsDClient = dogStatsD;
+const observationMetricType: DatadogObservationMetricType = "distribution";
+const datadogOptions: DatadogMetricsOptions = {
+  client: compatibleDogStatsD,
+  observationMetricType,
+};
+const datadogMetrics = createDatadogDialCacheMetrics(datadogOptions);
+const datadogClassAdapter = new DatadogDialCacheMetrics({
+  client: dogStatsD,
+  observationMetricType: "histogram",
+});
+const datadogCache = new DialCache({ metrics: datadogMetrics });
+const observationMetricTypeIsRequired: {} extends Pick<DatadogMetricsOptions, "observationMetricType">
+  ? false
+  : true = true;
 
 void cache;
 void classAdapter;
@@ -219,6 +269,9 @@ void openMetricsAdapter;
 void registryIsRequired;
 void glideRedisClient;
 void createValkeyGlideDialCacheClient;
+void datadogClassAdapter;
+void datadogCache;
+void observationMetricTypeIsRequired;
 `;
 
 try {
@@ -243,9 +296,9 @@ try {
     { cwd: workspace },
   );
 
-  for (const optionalPeer of ["prom-client", "@valkey/valkey-glide"]) {
-    if (await isResolvable(optionalPeer, workspace)) {
-      throw new Error(`The optional ${optionalPeer} peer was installed automatically`);
+  for (const integrationDependency of ["prom-client", "@valkey/valkey-glide", "hot-shots"]) {
+    if (await isResolvable(integrationDependency, workspace)) {
+      throw new Error(`The ${integrationDependency} integration dependency was installed automatically`);
     }
   }
 
@@ -263,13 +316,13 @@ try {
     [
       "--input-type=module",
       "--eval",
-      "await import('dialcache'); await import('dialcache/redis-protocol'); await import('dialcache/node-redis')",
+      "await import('dialcache'); await import('dialcache/datadog'); await import('dialcache/redis-protocol'); await import('dialcache/node-redis')",
     ],
     { cwd: workspace },
   );
   await exec(
     process.execPath,
-    ["--eval", "require('dialcache'); require('dialcache/redis-protocol'); require('dialcache/node-redis')"],
+    ["--eval", "require('dialcache'); require('dialcache/datadog'); require('dialcache/redis-protocol'); require('dialcache/node-redis')"],
     { cwd: workspace },
   );
   await exec(
@@ -290,6 +343,7 @@ try {
       "typescript@5.9.3",
       "prom-client@^15.1.3",
       "@valkey/valkey-glide@^2.4.2",
+      "hot-shots@^17.0.0",
     ],
     { cwd: workspace },
   );
@@ -305,7 +359,7 @@ try {
     [
       "--input-type=module",
       "--eval",
-      "await import('dialcache'); await import('dialcache/prometheus'); await import('dialcache/redis-protocol'); await import('dialcache/node-redis'); await import('dialcache/valkey-glide')",
+      "await import('dialcache'); await import('dialcache/datadog'); await import('dialcache/prometheus'); await import('dialcache/redis-protocol'); await import('dialcache/node-redis'); await import('dialcache/valkey-glide')",
     ],
     { cwd: workspace },
   );
@@ -313,7 +367,7 @@ try {
     process.execPath,
     [
       "--eval",
-      "require('dialcache'); require('dialcache/prometheus'); require('dialcache/redis-protocol'); require('dialcache/node-redis'); require('dialcache/valkey-glide')",
+      "require('dialcache'); require('dialcache/datadog'); require('dialcache/prometheus'); require('dialcache/redis-protocol'); require('dialcache/node-redis'); require('dialcache/valkey-glide')",
     ],
     { cwd: workspace },
   );
