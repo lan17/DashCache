@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { DialCache, DialCacheKeyConfig } from "../src/index.js";
+import { DialCache, DialCacheKeyConfig, type Serializer } from "../src/index.js";
 import { DialCacheContext, RequestLocalCache, getOrCreateRequestLocalCache } from "../src/context.js";
 
 interface Deferred<T> {
@@ -360,6 +360,14 @@ describe("DialCache request-local cache", () => {
       buffer: Buffer.from("cached"),
       typed: new Uint8Array([1, 2, 3]),
     };
+    const serializer: Serializer<typeof source> = {
+      dump: () => {
+        throw new Error("request-local-only serializer should not be used");
+      },
+      load: () => {
+        throw new Error("request-local-only serializer should not be used");
+      },
+    };
     let calls = 0;
     const getUser = dialcache.cached(async () => {
       calls += 1;
@@ -369,6 +377,7 @@ describe("DialCache request-local cache", () => {
       useCase: "RequestLocalReferenceIdentity",
       cacheKey: () => "123",
       defaultConfig: requestLocalConfig(),
+      serializer,
     });
 
     const [first, second] = await dialcache.enable(async () => [await getUser(), await getUser()] as const);

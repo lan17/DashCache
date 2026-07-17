@@ -7,6 +7,10 @@ export interface Serializer<T = unknown> {
 
 const JSON_UNDEFINED_SENTINEL = "__dialcache_json_undefined_v1__";
 
+/**
+ * The native JSON serializer used by default for Redis values. The generic type
+ * is a caller assertion; serialization does not perform semantic validation.
+ */
 export class JsonSerializer<T = unknown> implements Serializer<T> {
   async dump(value: T): Promise<string> {
     if (value === undefined) {

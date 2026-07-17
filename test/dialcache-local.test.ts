@@ -290,12 +290,19 @@ describe("DialCache local-only MVP", () => {
     // Given two calls would collide if key components were concatenated without escaping.
     const dialcache = new DialCache();
     let calls = 0;
-    const search = dialcache.cached(async (userId: string, filter?: string) => ({ userId, filter, calls: ++calls }), {
-      keyType: "user_id",
-      useCase: "DelimiterSafeLocalKeys",
-      cacheKey: (userId, filter) => ({ id: userId, args: { filter } }),
-      defaultConfig: DialCacheKeyConfig.enabled(60),
-    });
+    const search = dialcache.cached(
+      async (userId: string, filter?: string) => ({
+        userId,
+        ...(filter === undefined ? {} : { filter }),
+        calls: ++calls,
+      }),
+      {
+        keyType: "user_id",
+        useCase: "DelimiterSafeLocalKeys",
+        cacheKey: (userId, filter) => ({ id: userId, args: { filter } }),
+        defaultConfig: DialCacheKeyConfig.enabled(60),
+      },
+    );
 
     // When an id containing a query delimiter is followed by a structurally different key.
     const [first, second, firstAgain, secondAgain] = await dialcache.enable(async () => [
@@ -306,7 +313,7 @@ describe("DialCache local-only MVP", () => {
     ]);
 
     // Then each logical key gets its own cached value instead of sharing a colliding URN.
-    expect(first).toEqual({ userId: "123?filter=active", filter: undefined, calls: 1 });
+    expect(first).toEqual({ userId: "123?filter=active", calls: 1 });
     expect(second).toEqual({ userId: "123", filter: "active", calls: 2 });
     expect(firstAgain).toEqual(first);
     expect(secondAgain).toEqual(second);
@@ -795,6 +802,23 @@ describe("DialCache local-only MVP", () => {
     // Then undefined is a supported cached value instead of an invalid JSON payload.
     expect(loadedFromString).toBeUndefined();
     expect(loadedFromBuffer).toBeUndefined();
+  });
+
+  it("keeps native lossy JSON semantics without an extra validation pass", async () => {
+    const serializer = new JsonSerializer<unknown>();
+    const value = {
+      updatedAt: new Date("2026-07-17T12:00:00.000Z"),
+      missing: undefined,
+      nonFinite: Number.POSITIVE_INFINITY,
+    };
+
+    const dumped = await serializer.dump(value);
+    const loaded = await serializer.load(dumped);
+
+    expect(loaded).toEqual({
+      updatedAt: "2026-07-17T12:00:00.000Z",
+      nonFinite: null,
+    });
   });
 
   it("rejects unsupported top-level values in the JSON serializer", async () => {

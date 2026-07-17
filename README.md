@@ -176,6 +176,8 @@ const dialcache = new DialCache({
 });
 ```
 
+### Serialization
+
 The core Redis boundary is the client-agnostic `DialCacheRedisClient` interface. It exchanges serialized values as `string | Buffer` and does not expose client commands or wire encodings. Distinct untracked/tracked read and write Lua sources, the invalidation source, and wire constants are available from `dialcache/redis-protocol`. Custom adapters can use the root-exported `DialCacheRedisPayloadError` and `DialCacheRedisPayloadEncodingError` classes to preserve the standard metrics labels.
 
 Redis values use a compact binary frame:
@@ -188,6 +190,34 @@ bytes 11... serialized payload
 ```
 
 Redis's Lua `struct` library packs and unpacks the timestamp. Redis TTL is authoritative, so expiry metadata is not duplicated in the frame. `payload` is produced by the cached function's serializer, or by `JsonSerializer` by default. Custom serializers can return either `string` or `Buffer`; strings are stored as UTF-8 and Buffers are stored byte-for-byte without base64 expansion. Adapters restore the same representation before calling `serializer.load`.
+
+DialCache uses native `JSON.stringify` and `JSON.parse` by default. There is no runtime validation pass, so the default adds no traversal beyond JSON serialization itself. A top-level `undefined` result is supported with an internal sentinel.
+
+When a cached function's resolved return type is statically JSON-compatible, `serializer` remains optional. This includes JSON primitives, arrays, plain object/interface shapes, optional object fields, and a top-level `undefined`. Types known not to survive the default round trip require a per-function `Serializer<T>`:
+
+```ts
+import { DialCache, type Serializer } from "dialcache";
+
+const dialcache = new DialCache();
+const dateSerializer: Serializer<Date> = {
+  dump: (value) => value.toISOString(),
+  load: (value) => new Date(Buffer.isBuffer(value) ? value.toString("utf8") : value),
+};
+
+const getUpdatedAt = dialcache.cached(
+  (userId: string) => db.fetchUpdatedAt(userId),
+  {
+    keyType: "user_id",
+    useCase: "GetUpdatedAt",
+    cacheKey: (userId) => userId,
+    serializer: dateSerializer,
+  },
+);
+```
+
+The compile-time guard rejects known incompatible shapes such as `Date`, `Map`, `Set`, `bigint`, symbols, functions, Buffers, typed arrays, method-bearing class instances, required nested `undefined`, `unknown`, and `any`. It applies to every `cached()` declaration because active layers are selected at runtime. A global Redis serializer is not parameterized by each cached return type, so it cannot discharge this requirement; non-JSON functions must select a typed per-function serializer.
+
+This guard is deliberately conservative and is not a proof of runtime data. TypeScript cannot detect non-finite numbers, cyclic/shared references, runtime getter or `toJSON` behavior, or data-only class instances that look like plain objects. Opaque, generic, or deeply recursive types may also require an explicit serializer. Providing `Serializer<T>` (including an explicitly typed `JsonSerializer<T>`) is a trusted caller assertion; DialCache does not serialize-and-deserialize again to validate it.
 
 ## Targeted invalidation and watermarks
 

@@ -47,11 +47,64 @@ type AnyFn = (...args: never[]) => unknown;
 export type CachedValue<Fn extends AnyFn> = Awaited<ReturnType<Fn>>;
 type CacheKeySelector<Fn extends AnyFn> = (...args: Parameters<Fn>) => CacheKeySpec;
 
-export interface CachedOptions<Fn extends AnyFn> {
+type IsAny<T> = 0 extends 1 & T ? true : false;
+type IsUnknown<T> = IsAny<T> extends true
+  ? false
+  : unknown extends T
+    ? [keyof T] extends [never]
+      ? true
+      : false
+    : false;
+type AllTrue<T> = Exclude<T, true> extends never ? true : false;
+
+/**
+ * A bounded, structural approximation of values whose decoded JSON remains
+ * assignable to the declared type. It exists only in declarations and adds no
+ * runtime validation or serialization work.
+ */
+type IsJsonCompatible<
+  T,
+  TopLevel extends boolean = true,
+  Depth extends readonly unknown[] = [],
+> = IsAny<T> extends true
+  ? false
+  : IsUnknown<T> extends true
+    ? false
+    : [T] extends [never]
+      ? true
+      : Depth["length"] extends 8
+        ? false
+        : AllTrue<T extends unknown ? IsJsonMember<T, TopLevel, Depth> : never>;
+
+type IsJsonMember<T, TopLevel extends boolean, Depth extends readonly unknown[]> = [T] extends [
+  string | number | boolean | null,
+]
+  ? true
+  : [T] extends [void]
+    ? TopLevel
+    : T extends (...args: infer _Args) => infer _Result
+      ? false
+      : T extends readonly (infer Item)[]
+        ? IsJsonCompatible<Item, false, [...Depth, unknown]>
+        : T extends object
+          ? IsJsonObject<T, Depth>
+          : false;
+
+type IsJsonObject<T extends object, Depth extends readonly unknown[]> = [keyof T] extends [never]
+  ? true
+  : AllTrue<{
+      [Key in keyof T]-?: Key extends string | number
+        // Omitting an optional undefined property remains type-compatible.
+        ? {} extends Pick<T, Key>
+          ? IsJsonCompatible<Exclude<T[Key], undefined>, false, [...Depth, unknown]>
+          : IsJsonCompatible<T[Key], false, [...Depth, unknown]>
+        : false;
+    }[keyof T]>;
+
+interface CachedOptionsBase<Fn extends AnyFn> {
   readonly keyType: string;
   readonly useCase: string;
   readonly defaultConfig?: DialCacheKeyConfig | null;
-  readonly serializer?: Serializer<CachedValue<Fn>> | null;
   readonly trackForInvalidation?: boolean;
   /**
    * Select every input dimension that can affect the returned value. Concurrent
@@ -59,6 +112,18 @@ export interface CachedOptions<Fn extends AnyFn> {
    */
   readonly cacheKey: CacheKeySelector<Fn>;
 }
+
+type SerializerOption<Value> = IsJsonCompatible<Value> extends true
+  ? { readonly serializer?: Serializer<Value> | null }
+  : { readonly serializer: Serializer<Value> };
+
+/**
+ * Options for a cached function. A serializer is required when the function's
+ * resolved return type is not statically compatible with the default JSON
+ * serializer. Supplying one is a trusted assertion; DialCache does not perform
+ * runtime round-trip validation.
+ */
+export type CachedOptions<Fn extends AnyFn> = CachedOptionsBase<Fn> & SerializerOption<CachedValue<Fn>>;
 
 /**
  * A cached function returns references owned by the cache. Treat returned

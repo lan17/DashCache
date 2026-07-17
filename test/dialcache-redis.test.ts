@@ -287,6 +287,46 @@ describe("DialCache Redis TTL layer", () => {
     expect(serializer.load).toHaveBeenCalledOnce();
   });
 
+  it("round-trips a statically non-JSON value through its required serializer", async () => {
+    const redis = new FakeRedis();
+    const serializer: Serializer<Date> = {
+      dump: vi.fn((value) => value.toISOString()),
+      load: vi.fn((value) => new Date(Buffer.isBuffer(value) ? value.toString("utf8") : value)),
+    };
+    const writer = new DialCache({ redis: { client: redis } });
+    const writeUpdatedAt = writer.cached(async () => new Date("2026-07-17T12:00:00.000Z"), {
+      keyType: "user_id",
+      useCase: "RedisDateSerializer",
+      cacheKey: () => "123",
+      defaultConfig: DialCacheKeyConfig.enabled(60),
+      serializer,
+    });
+    await writer.enable(async () => await writeUpdatedAt());
+
+    const reader = new DialCache({ redis: { client: redis } });
+    let readerCalls = 0;
+    const readUpdatedAt = reader.cached(
+      async () => {
+        readerCalls += 1;
+        return new Date("2026-07-18T12:00:00.000Z");
+      },
+      {
+        keyType: "user_id",
+        useCase: "RedisDateSerializer",
+        cacheKey: () => "123",
+        defaultConfig: DialCacheKeyConfig.enabled(60),
+        serializer,
+      },
+    );
+
+    const value = await reader.enable(async () => await readUpdatedAt());
+
+    expect(value).toEqual(new Date("2026-07-17T12:00:00.000Z"));
+    expect(readerCalls).toBe(0);
+    expect(serializer.dump).toHaveBeenCalledOnce();
+    expect(serializer.load).toHaveBeenCalledOnce();
+  });
+
   it("isolates binary read payloads from the stored Redis frame", async () => {
     const redis = new FakeRedis();
     const valueKey = "binary-isolation:{item:123}:value";
