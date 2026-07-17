@@ -78,9 +78,9 @@ describe("DialCache local-only MVP", () => {
     expect(calls).toBe(1);
   });
 
-  it("supports metrics-disabled local caching and no-op invalidation without Redis", async () => {
-    // Given metrics may be explicitly disabled and Redis may be absent.
-    const dialcache = new DialCache({ metrics: false });
+  it("supports local caching with metrics omitted and no-op invalidation without Redis", async () => {
+    // Given metrics and Redis are both absent.
+    const dialcache = new DialCache();
     let calls = 0;
     const getUser = dialcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",

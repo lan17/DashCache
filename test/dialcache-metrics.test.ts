@@ -1,4 +1,3 @@
-import { Registry } from "prom-client";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -78,35 +77,6 @@ const remoteOnly = () =>
 const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("DialCache observability metrics", () => {
-  it("reuses existing Prometheus collectors when multiple caches share a registry", async () => {
-    // Given two DialCache instances use the same custom Prometheus registry and metric names.
-    const registry = new Registry();
-    const firstCache = new DialCache({ metricsRegistry: registry });
-    const secondCache = new DialCache({ metricsRegistry: registry });
-    const first = firstCache.cached(async (userId: string) => ({ userId }), {
-      keyType: "user_id",
-      useCase: "DuplicateMetricRegistrationFirst",
-      cacheKey: (userId) => userId,
-      defaultConfig: localOnly(),
-    });
-    const second = secondCache.cached(async (userId: string) => ({ userId }), {
-      keyType: "user_id",
-      useCase: "DuplicateMetricRegistrationSecond",
-      cacheKey: (userId) => userId,
-      defaultConfig: localOnly(),
-    });
-
-    // When both caches emit request metrics.
-    await firstCache.enable(async () => await first("123"));
-    await secondCache.enable(async () => await second("456"));
-
-    // Then construction does not throw duplicate-registration errors and both samples land in one collector.
-    await expect(sumMetric(registry, "dialcache_request_counter")).resolves.toBe(2);
-    await expect(registry.getSingleMetricAsString("dialcache_request_counter")).resolves.toContain(
-      "dialcache_request_counter",
-    );
-  });
-
   it("supports an injected metrics adapter without requiring Prometheus", async () => {
     // Given a custom in-memory metrics adapter.
     const metrics = new RecordingMetrics();
@@ -319,128 +289,6 @@ describe("DialCache observability metrics", () => {
     ).toHaveLength(1);
   });
 
-  it("exports Prometheus counters and histograms for requests, misses, fallbacks, gets, serialization, and size", async () => {
-    // Given a custom Prometheus registry and a Redis-backed cached function.
-    const registry = new Registry();
-    const redis = new FakeRedis();
-    const dialcache = new DialCache({ redis: { client: redis }, metricsRegistry: registry, metricsPrefix: "test_" });
-    let calls = 0;
-    const getUser = dialcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
-      keyType: "user_id",
-      useCase: "PrometheusMetricExport",
-      cacheKey: (userId) => userId,
-      defaultConfig: remoteOnly(),
-    });
-
-    // When the first read misses Redis and the second read hits Redis.
-    const first = await dialcache.enable(async () => await getUser("123"));
-    const second = await dialcache.enable(async () => await getUser("123"));
-
-    // Then Prometheus contains DialCache metric families with the expected label values.
-    expect(first).toEqual({ userId: "123", calls: 1 });
-    expect(second).toEqual({ userId: "123", calls: 1 });
-    await expect(sumMetric(registry, "test_dialcache_request_counter", { use_case: "PrometheusMetricExport", layer: "remote" })).resolves.toBe(2);
-    await expect(sumMetric(registry, "test_dialcache_miss_counter", { use_case: "PrometheusMetricExport", layer: "remote" })).resolves.toBe(1);
-    await expect(sumMetric(registry, "test_dialcache_get_timer", { use_case: "PrometheusMetricExport", layer: "remote" })).resolves.toBeGreaterThan(0);
-    await expect(sumMetric(registry, "test_dialcache_fallback_timer", { use_case: "PrometheusMetricExport", layer: "remote" })).resolves.toBeGreaterThan(0);
-    await expect(
-      sumMetric(registry, "test_dialcache_serialization_timer", { use_case: "PrometheusMetricExport", layer: "remote" }),
-    ).resolves.toBeGreaterThan(0);
-    await expect(sumMetric(registry, "test_dialcache_size_histogram", { use_case: "PrometheusMetricExport", layer: "remote" })).resolves.toBeGreaterThan(0);
-  });
-
-  it("exports Prometheus counters for disabled, error, invalidation, and coalesced events", async () => {
-    // Given a custom Prometheus registry and a Redis-backed cache that can exercise every documented counter family.
-    const registry = new Registry();
-    const redis = new FakeRedis();
-    const dialcache = new DialCache({ redis: { client: redis }, metricsRegistry: registry, metricsPrefix: "test_" });
-    const contextDisabled = dialcache.cached(async (userId: string) => userId, {
-      keyType: "user_id",
-      useCase: "PrometheusDisabledMetric",
-      cacheKey: (userId) => userId,
-      defaultConfig: localOnly(),
-    });
-    const keyBuildFailure = dialcache.cached(async (userId: string) => userId, {
-      keyType: "user_id",
-      useCase: "PrometheusErrorMetric",
-      cacheKey: () => {
-        throw new Error("bad key");
-      },
-      defaultConfig: localOnly(),
-    });
-    let releaseFallback: () => void = () => undefined;
-    const fallbackGate = new Promise<void>((resolve) => {
-      releaseFallback = resolve;
-    });
-    let coalescedCalls = 0;
-    const coalesced = dialcache.cached(async (userId: string) => {
-      coalescedCalls += 1;
-      await fallbackGate;
-      return userId;
-    }, {
-      keyType: "user_id",
-      useCase: "PrometheusCoalescedMetric",
-      cacheKey: (userId) => userId,
-      defaultConfig: localOnly(),
-    });
-    let releaseRequestLocalFallback: () => void = () => undefined;
-    const requestLocalFallbackGate = new Promise<void>((resolve) => {
-      releaseRequestLocalFallback = resolve;
-    });
-    const requestLocalCoalesced = dialcache.cached(async (userId: string) => {
-      await requestLocalFallbackGate;
-      return userId;
-    }, {
-      keyType: "user_id",
-      useCase: "PrometheusRequestLocalCoalescedMetric",
-      cacheKey: (userId) => userId,
-      defaultConfig: new DialCacheKeyConfig({ requestLocal: true }),
-    });
-
-    // When each counter path emits once.
-    await contextDisabled("123");
-    await dialcache.enable(async () => await keyBuildFailure("123"));
-    await dialcache.invalidateRemote("user_id", "123");
-    const inflight = dialcache.enable(async () => await Promise.all([coalesced("456"), coalesced("456")]));
-    await tick();
-    releaseFallback();
-    await inflight;
-    const requestLocalInflight = dialcache.enable(async () =>
-      await Promise.all([requestLocalCoalesced("789"), requestLocalCoalesced("789")]),
-    );
-    await tick();
-    releaseRequestLocalFallback();
-    await requestLocalInflight;
-
-    // Then the Prometheus registry exposes the documented counter families with their operational labels.
-    expect(coalescedCalls).toBe(1);
-    await expect(
-      sumMetric(registry, "test_dialcache_disabled_counter", { use_case: "PrometheusDisabledMetric", layer: "noop", reason: "context" }),
-    ).resolves.toBe(1);
-    await expect(
-      sumMetric(registry, "test_dialcache_error_counter", {
-        use_case: "PrometheusErrorMetric",
-        layer: "noop",
-        error: "Error",
-        in_fallback: "false",
-      }),
-    ).resolves.toBe(1);
-    await expect(sumMetric(registry, "test_dialcache_invalidation_counter", { key_type: "user_id", layer: "remote" })).resolves.toBe(1);
-    await expect(
-      sumMetric(registry, "test_dialcache_coalesced_counter", {
-        use_case: "PrometheusCoalescedMetric",
-        key_type: "user_id",
-        scope: "process",
-      }),
-    ).resolves.toBe(1);
-    await expect(
-      sumMetric(registry, "test_dialcache_coalesced_counter", {
-        use_case: "PrometheusRequestLocalCoalescedMetric",
-        key_type: "user_id",
-        scope: "request_local",
-      }),
-    ).resolves.toBe(1);
-  });
 });
 
 function events(
@@ -450,22 +298,5 @@ function events(
 ): Array<{ readonly name: string; readonly labels: Record<string, unknown>; readonly value?: number }> {
   return metrics.events.filter(
     (event) => event.name === name && Object.entries(labels).every(([key, value]) => event.labels[key] === value),
-  );
-}
-
-async function sumMetric(
-  registry: Registry,
-  name: string,
-  labels: Record<string, string> = {},
-): Promise<number> {
-  const metrics = (await registry.getMetricsAsJSON()) as Array<{
-    readonly name: string;
-    readonly values: Array<{ readonly value: number; readonly labels: Record<string, string | number> }>;
-  }>;
-  const metric = metrics.find((candidate) => candidate.name === name);
-  return (
-    metric?.values
-      .filter((sample) => Object.entries(labels).every(([key, value]) => sample.labels[key] === value))
-      .reduce((total, sample) => total + sample.value, 0) ?? 0
   );
 }

@@ -1,5 +1,3 @@
-import type { Registry } from "prom-client";
-
 import type { DialCacheKey } from "./key.js";
 import type { DialCacheMetricsAdapter } from "./metrics.js";
 import type { RedisConfig } from "./internal/redis-cache.js";
@@ -71,9 +69,7 @@ export interface DialCacheConfig {
   readonly localMaxSize?: number;
   readonly redis?: RedisConfig;
   readonly rampSampler?: CacheRampSampler;
-  readonly metrics?: DialCacheMetricsAdapter | false;
-  readonly metricsPrefix?: string;
-  readonly metricsRegistry?: Registry;
+  readonly metrics?: DialCacheMetricsAdapter;
 }
 
 function stablePercent(value: string): number {
