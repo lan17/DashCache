@@ -1,4 +1,10 @@
-import { Counter, Histogram, Registry, register as defaultRegistry } from "prom-client";
+import {
+  Counter,
+  Histogram,
+  Registry,
+  register as defaultRegistry,
+  type OpenMetricsContentType,
+} from "prom-client";
 import { describe, expect, it } from "vitest";
 
 import { CacheLayer, DialCache, DialCacheKeyConfig } from "../src/index.js";
@@ -191,6 +197,27 @@ describe("Prometheus metrics adapter", () => {
       expect(registry.getMetricsAsArray().map(({ name }) => name)).toEqual([metricName]);
     });
   }
+
+  it("rejects exemplar-enabled collectors before registering anything", () => {
+    const registry = new Registry<OpenMetricsContentType>();
+    registry.setContentType(Registry.OPENMETRICS_CONTENT_TYPE);
+    const prefix = "exemplar_";
+    const metricName = `${prefix}dialcache_get_timer`;
+    new Histogram({
+      name: metricName,
+      help: GET_TIMER_HELP,
+      labelNames: GET_TIMER_LABELS,
+      buckets: CONFIGURED_TIMER_BUCKETS,
+      enableExemplars: true,
+      registers: [registry],
+    });
+
+    expect(() => new PrometheusDialCacheMetrics({ registry, prefix })).toThrowError(
+      `Prometheus collector "${metricName}" already exists with an incompatible schema. ` +
+        "Use a unique prefix or a separate Registry.",
+    );
+    expect(registry.getMetricsAsArray().map(({ name }) => name)).toEqual([metricName]);
+  });
 
   it("exports counters and histograms for requests, misses, fallbacks, gets, serialization, and size", async () => {
     const registry = new Registry();

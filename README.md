@@ -404,7 +404,7 @@ app.get("/metrics", async (_req, res) => {
 });
 ```
 
-The adapter requires a caller-owned `Registry`; it never uses the global default registry and does not clear or otherwise own the registry lifecycle. Multiple adapters with the same registry and prefix reuse existing collectors when their type, help, labels, and histogram buckets match. Adapter construction fails before registering anything if a same-name collector has an incompatible schema; use a unique prefix or a separate registry to resolve the collision.
+The adapter requires a caller-owned `Registry`; it never uses the global default registry and does not clear or otherwise own the registry lifecycle. Multiple adapters with the same registry and prefix reuse existing collectors when their type, help, labels, histogram buckets, and exemplar mode match. Adapter construction fails before registering anything if a same-name collector has an incompatible schema; use a unique prefix or a separate registry to resolve the collision.
 
 The Prometheus adapter emits:
 

@@ -182,18 +182,22 @@ import {
   createValkeyGlideDialCacheClient,
   type ValkeyGlideDialCacheClient,
 } from "dialcache/valkey-glide";
-import { Registry } from "prom-client";
+import { Registry, type OpenMetricsContentType } from "prom-client";
 
 const registry = new Registry();
 const options: PrometheusMetricsOptions = { registry, prefix: "consumer_" };
 const metrics = createPrometheusDialCacheMetrics(options);
 const cache = new DialCache({ metrics });
 const classAdapter = new PrometheusDialCacheMetrics({ registry, prefix: "class_" });
+const openMetricsRegistry = new Registry<OpenMetricsContentType>();
+openMetricsRegistry.setContentType(Registry.OPENMETRICS_CONTENT_TYPE);
+const openMetricsAdapter = new PrometheusDialCacheMetrics({ registry: openMetricsRegistry, prefix: "open_" });
 const registryIsRequired: {} extends Pick<PrometheusMetricsOptions, "registry"> ? false : true = true;
 const glideRedisClient: ValkeyGlideDialCacheClient | undefined = undefined;
 
 void cache;
 void classAdapter;
+void openMetricsAdapter;
 void registryIsRequired;
 void glideRedisClient;
 void createValkeyGlideDialCacheClient;

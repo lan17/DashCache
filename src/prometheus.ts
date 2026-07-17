@@ -1,4 +1,4 @@
-import { Counter, Histogram, type Registry } from "prom-client";
+import { Counter, Histogram, type OpenMetricsContentType, type Registry } from "prom-client";
 
 import type {
   CacheMetricLabels,
@@ -11,9 +11,11 @@ import type {
 } from "./metrics.js";
 
 export interface PrometheusMetricsOptions {
-  readonly registry: Registry;
+  readonly registry: PrometheusRegistry;
   readonly prefix?: string;
 }
+
+type PrometheusRegistry = Registry | Registry<OpenMetricsContentType>;
 
 type CounterLabels = "use_case" | "key_type" | "layer";
 type DisabledLabels = CounterLabels | "reason";
@@ -45,6 +47,7 @@ interface CollectorShape {
   readonly type?: unknown;
   readonly labelNames?: unknown;
   readonly buckets?: unknown;
+  readonly enableExemplars?: unknown;
 }
 
 const TIMER_BUCKETS = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10];
@@ -210,7 +213,7 @@ function collectorConfigs(prefix: string) {
   } as const;
 }
 
-function validateExistingCollectors(registry: Registry, configs: readonly CollectorConfig[]): void {
+function validateExistingCollectors(registry: PrometheusRegistry, configs: readonly CollectorConfig[]): void {
   for (const config of configs) {
     const existing = registry.getSingleMetric(config.name);
     if (existing === undefined) {
@@ -223,6 +226,7 @@ function validateExistingCollectors(registry: Registry, configs: readonly Collec
       collector.name === config.name &&
       collector.help === config.help &&
       collector.type === config.type &&
+      collector.enableExemplars === false &&
       arraysEqual(collector.labelNames, config.labelNames) &&
       (config.type === "counter" || arraysEqual(collector.buckets, config.buckets));
     if (!compatible) {
@@ -243,7 +247,7 @@ function arraysEqual(actual: unknown, expected: readonly unknown[]): boolean {
 }
 
 function counter<T extends string>(
-  registry: Registry,
+  registry: PrometheusRegistry,
   config: CounterCollectorConfig<T>,
 ): Counter<T> {
   const existing = registry.getSingleMetric(config.name) as Counter<T> | undefined;
@@ -259,7 +263,7 @@ function counter<T extends string>(
 }
 
 function histogram<T extends string>(
-  registry: Registry,
+  registry: PrometheusRegistry,
   config: HistogramCollectorConfig<T>,
 ): Histogram<T> {
   const existing = registry.getSingleMetric(config.name) as Histogram<T> | undefined;
