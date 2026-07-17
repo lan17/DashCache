@@ -413,7 +413,7 @@ The Prometheus adapter emits:
 | `dialcache_request_counter` | Counter | `use_case`, `key_type`, `layer` | Cache-layer requests that reached an enabled layer |
 | `dialcache_miss_counter` | Counter | `use_case`, `key_type`, `layer` | Cache misses |
 | `dialcache_disabled_counter` | Counter | `use_case`, `key_type`, `layer`, `reason` | Cache skips (`context`, `missing_config`, `invalid_ttl`, `ramped_down`, `config_error`) |
-| `dialcache_error_counter` | Counter | `use_case`, `key_type`, `layer`, `error`, `in_fallback` | Cache/fallback errors, with `in_fallback` separating cache plumbing failures from application fallback failures |
+| `dialcache_error_counter` | Counter | `use_case`, `key_type`, `layer`, `error`, `in_fallback` | Cache/fallback errors classified by a bounded failure site |
 | `dialcache_invalidation_counter` | Counter | `key_type`, `layer` | Invalidation calls for the layers touched today |
 | `dialcache_coalesced_counter` | Counter | `use_case`, `key_type`, `scope` | Coalesced requests split by `request_local` or `process` scope |
 | `dialcache_get_timer` | Histogram | `use_case`, `key_type`, `layer` | Cache get latency in seconds |
@@ -422,6 +422,26 @@ The Prometheus adapter emits:
 | `dialcache_size_histogram` | Histogram | `use_case`, `key_type`, `layer` | Serialized Redis payload size in bytes |
 
 The `layer` label is `request_local`, `local` (process-local), or `remote`. Disabled-context, key-construction, and config-provider failures use `noop` because no cache layer was reached. The bounded `scope` label on `dialcache_coalesced_counter` distinguishes request-local from instance-scoped single-flight work. `scope="process"` coordinates calls only within one `DialCache` instance; separate instances in the same process do not share in-flight state.
+
+### Error categories
+
+The `error` label reports where an operation failed rather than copying the thrown value's class or `Error.name`:
+
+| `error` | Meaning |
+| --- | --- |
+| `key_construction` | The cache-key selector or `DialCacheKey` construction failed |
+| `config_resolution` | Layer configuration or ramp resolution failed |
+| `cache_read` | A local-cache or Redis read failed |
+| `cache_write` | A local-cache or Redis write failed |
+| `serialization_load` | Deserializing a Redis payload failed |
+| `serialization_dump` | Serializing a value for Redis failed |
+| `invalidation` | Writing an invalidation watermark failed |
+| `fallback` | The wrapped application function failed |
+| `unknown` | Reserved for an otherwise unclassified future failure site |
+
+These values are defined by the backend-neutral core and are identical for every metrics adapter. Raw thrown values, error names, messages, cache IDs, arguments, and Redis keys are never included in metric labels. Operational errors are still passed to the configured logger where the existing failure path logs them. `in_fallback` remains the explicit cache-plumbing-versus-application distinction for existing dashboards.
+
+Applications upgrading from exception-name labels must update alerts and dashboards to match these failure-site values.
 
 ### Custom adapters
 

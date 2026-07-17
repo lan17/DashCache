@@ -16,11 +16,11 @@ import { DialCacheKey, normalizeArgs } from "./key.js";
 import {
   NO_CACHE_LAYER,
   REQUEST_LOCAL_CACHE_LAYER,
-  errorName,
   labelsFor,
   type CacheMetricLabels,
   type CoalescingScope,
   type DialCacheMetricsAdapter,
+  type MetricErrorKind,
   type MetricLayer,
 } from "./metrics.js";
 import type { Serializer } from "./serializer.js";
@@ -213,7 +213,7 @@ export class DialCache {
         this.logger.error("Could not construct DialCache key", error);
         this.metrics?.error({
           ...noLayerLabels,
-          error: errorName(error),
+          error: "key_construction",
           inFallback: false,
         });
         return await this.callFallback(noLayerLabels, fallback);
@@ -273,7 +273,7 @@ export class DialCache {
         useCase: "watermark",
         keyType,
         layer: CacheLayer.REMOTE,
-        error: errorName(error),
+        error: "invalidation",
         inFallback: false,
       });
       throw error;
@@ -392,7 +392,6 @@ export class DialCache {
         suppressCacheWrite = wroteRemote === false;
       } catch (error) {
         this.logger.warn("Error putting value in Redis cache", error);
-        this.recordError(key, CacheLayer.REMOTE, error, false);
         suppressCacheWrite = key.trackForInvalidation;
       }
     }
@@ -414,7 +413,7 @@ export class DialCache {
       return result;
     } catch (error) {
       this.logger.error("Error resolving local cache config", error);
-      this.recordError(key, CacheLayer.LOCAL, error, false);
+      this.recordError(key, CacheLayer.LOCAL, "config_resolution");
       this.metrics?.disabled({ ...labelsFor(key, CacheLayer.LOCAL), reason: "config_error" });
       return { status: "disabled", reason: "config_error" };
     }
@@ -432,7 +431,7 @@ export class DialCache {
       return result;
     } catch (error) {
       this.logger.error("Error getting value from local cache", error);
-      this.recordError(key, CacheLayer.LOCAL, error, false);
+      this.recordError(key, CacheLayer.LOCAL, "cache_read");
       this.metrics?.disabled({ ...labelsFor(key, CacheLayer.LOCAL), reason: "config_error" });
       return { status: "disabled", reason: "config_error" } as const;
     }
@@ -452,7 +451,7 @@ export class DialCache {
       return result;
     } catch (error) {
       this.logger.warn("Error resolving Redis cache config", error);
-      this.recordError(key, CacheLayer.REMOTE, error, false);
+      this.recordError(key, CacheLayer.REMOTE, "config_resolution");
       return { status: "disabled", reason: "config_error", ...(key.trackForInvalidation ? { skipCacheWrite: true } : {}) } as const;
     }
   }
@@ -469,7 +468,6 @@ export class DialCache {
       return result;
     } catch (error) {
       this.logger.warn("Error getting value from Redis cache", error);
-      this.recordError(key, CacheLayer.REMOTE, error, false);
       return {
         status: "disabled",
         reason: "config_error",
@@ -483,7 +481,7 @@ export class DialCache {
       await this.localCache.put(key, value, config);
     } catch (error) {
       this.logger.warn("Error putting value in local cache", error);
-      this.recordError(key, CacheLayer.LOCAL, error, false);
+      this.recordError(key, CacheLayer.LOCAL, "cache_write");
     }
   }
 
@@ -492,15 +490,15 @@ export class DialCache {
     try {
       return await fallback();
     } catch (error) {
-      this.metrics?.error({ ...labels, error: errorName(error), inFallback: true });
+      this.metrics?.error({ ...labels, error: "fallback", inFallback: true });
       throw error;
     } finally {
       this.metrics?.observeFallback(labels, elapsedSeconds(start));
     }
   }
 
-  private recordError(key: DialCacheKey, layer: CacheLayer, error: unknown, inFallback: boolean): void {
-    this.metrics?.error({ ...labelsFor(key, layer), error: errorName(error), inFallback });
+  private recordError(key: DialCacheKey, layer: CacheLayer, kind: MetricErrorKind): void {
+    this.metrics?.error({ ...labelsFor(key, layer), error: kind, inFallback: false });
   }
 
   private registerUseCase(useCase: string): void {

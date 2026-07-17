@@ -114,7 +114,7 @@ describe("Prometheus metrics adapter", () => {
     metrics.request(labels);
     metrics.miss(labels);
     metrics.disabled({ ...labels, reason: "context" });
-    metrics.error({ ...labels, error: "Error", inFallback: false });
+    metrics.error({ ...labels, error: "cache_read", inFallback: false });
     metrics.invalidation({ keyType: labels.keyType, layer: labels.layer });
     metrics.coalesced?.({ useCase: labels.useCase, keyType: labels.keyType, scope: "process" });
     metrics.observeGet(labels, 0.05);
@@ -288,7 +288,9 @@ describe("Prometheus metrics adapter", () => {
       keyType: "user_id",
       useCase: "PrometheusErrorMetric",
       cacheKey: () => {
-        throw new Error("bad key");
+        const error = new Error("bad key for tenant-123");
+        error.name = "Tenant123KeyError";
+        throw error;
       },
       defaultConfig: localOnly(),
     });
@@ -343,10 +345,11 @@ describe("Prometheus metrics adapter", () => {
       sumMetric(registry, "test_dialcache_error_counter", {
         use_case: "PrometheusErrorMetric",
         layer: "noop",
-        error: "Error",
+        error: "key_construction",
         in_fallback: "false",
       }),
     ).resolves.toBe(1);
+    await expect(registry.metrics()).resolves.not.toMatch(/Tenant123KeyError|tenant-123|bad key/);
     await expect(sumMetric(registry, "test_dialcache_invalidation_counter", { key_type: "user_id", layer: "remote" })).resolves.toBe(1);
     await expect(
       sumMetric(registry, "test_dialcache_coalesced_counter", {

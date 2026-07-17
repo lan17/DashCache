@@ -4,7 +4,6 @@ import { CacheLayer, DialCacheKey, DialCacheKeyConfig } from "../src/index.js";
 import { LocalCache } from "../src/internal/local-cache.js";
 import { RedisCache } from "../src/internal/redis-cache.js";
 import { resolveLayerConfig } from "../src/internal/runtime-config.js";
-import { errorName } from "../src/metrics.js";
 import { encodeFrame, FakeRedis } from "./fake-redis.js";
 
 const key = (defaultConfig: DialCacheKeyConfig | null = DialCacheKeyConfig.enabled(60)) =>
@@ -60,7 +59,7 @@ describe("DialCache observability internal compatibility paths", () => {
     expect(redis.values.has(`${disabledKey.urn}:dialcache-frame-v1`)).toBe(false);
   });
 
-  it("preserves runtime-config and error-name edge behavior used by metrics", async () => {
+  it("preserves runtime-config edge behavior used by metrics", async () => {
     // Given configs for missing ramp and non-finite ramp samples.
     const missingRamp = new DialCacheKeyConfig({ ttlSec: { [CacheLayer.LOCAL]: 60 }, ramp: {} });
     const partialRamp = new DialCacheKeyConfig({
@@ -88,10 +87,9 @@ describe("DialCache observability internal compatibility paths", () => {
       rampSampler: () => Number.NaN,
     });
 
-    // Then disabled config returns null and non-Error throws get stable metric labels.
+    // Then disabled configuration paths remain explicit.
     expect(noConfig).toBeNull();
     expect(noRamp).toBeNull();
     expect(nonFiniteSample).toBeNull();
-    expect(errorName("string failure")).toBe("string");
   });
 });

@@ -372,7 +372,7 @@ describe.each(engines)("DialCache Lua protocol on $name", ({ image }) => {
       useCase: "RealMalformedEncoding",
       keyType: "user_id",
       layer: CacheLayer.REMOTE,
-      error: "DialCacheRedisPayloadEncodingError",
+      error: "cache_read",
       inFallback: false,
     });
     expect(logger.warn).toHaveBeenCalledWith(
