@@ -9,6 +9,17 @@ type RequestLocalCacheLayer = typeof REQUEST_LOCAL_CACHE_LAYER;
 export type MetricLayer = CacheLayer | RequestLocalCacheLayer | NoCacheLayer;
 export type CoalescingScope = "request_local" | "process";
 export type DisabledReason = "context" | "missing_config" | "invalid_ttl" | "ramped_down" | "config_error";
+/** Stable failure sites used instead of backend- or application-defined error names. */
+export type MetricErrorKind =
+  | "key_construction"
+  | "config_resolution"
+  | "cache_read"
+  | "cache_write"
+  | "serialization_load"
+  | "serialization_dump"
+  | "invalidation"
+  | "fallback"
+  | "unknown";
 
 export interface CacheMetricLabels {
   readonly useCase: string;
@@ -21,7 +32,7 @@ export interface DisabledMetricLabels extends CacheMetricLabels {
 }
 
 export interface ErrorMetricLabels extends CacheMetricLabels {
-  readonly error: string;
+  readonly error: MetricErrorKind;
   readonly inFallback: boolean;
 }
 
@@ -56,8 +67,4 @@ export interface DialCacheMetricsAdapter {
 
 export function labelsFor(key: DialCacheKey, layer: MetricLayer): CacheMetricLabels {
   return { useCase: key.useCase, keyType: key.keyType, layer };
-}
-
-export function errorName(error: unknown): string {
-  return error instanceof Error ? error.name : typeof error;
 }

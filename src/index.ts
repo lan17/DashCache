@@ -10,6 +10,7 @@ export type {
   ErrorMetricLabels,
   DialCacheMetricsAdapter,
   InvalidationMetricLabels,
+  MetricErrorKind,
   MetricLayer,
   SerializationMetricLabels,
 } from "./metrics.js";

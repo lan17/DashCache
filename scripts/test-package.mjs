@@ -20,6 +20,7 @@ const rootConsumer = `import {
   type DialCacheConfig,
   type DialCacheMetricsAdapter,
   type DialCacheRedisClient,
+  type MetricErrorKind,
   type Serializer,
 } from "dialcache";
 import { createNodeRedisDialCacheClient } from "dialcache/node-redis";
@@ -126,6 +127,20 @@ const requestLocalCoalescingLabels: CoalescedMetricLabels = {
   scope: "request_local",
 };
 const requestLocalCoalescingScope: CoalescingScope = "request_local";
+const boundedErrorKind: MetricErrorKind = "cache_read";
+const metricErrorKinds: Readonly<Record<MetricErrorKind, true>> = {
+  key_construction: true,
+  config_resolution: true,
+  cache_read: true,
+  cache_write: true,
+  serialization_load: true,
+  serialization_dump: true,
+  invalidation: true,
+  fallback: true,
+  unknown: true,
+};
+// @ts-expect-error Arbitrary exception names are not DialCache metric error categories.
+const unboundedErrorKind: MetricErrorKind = "Tenant123Error";
 
 const customRedisClient: DialCacheRedisClient = {
   read: async () => Buffer.from([0, 255]),
@@ -153,6 +168,9 @@ void requestLocalConfig;
 void structuralConfigProvider;
 void requestLocalCoalescingLabels;
 void requestLocalCoalescingScope;
+void boundedErrorKind;
+void metricErrorKinds;
+void unboundedErrorKind;
 void createNodeRedisDialCacheClient;
 void READ_CACHE_SCRIPT;
 void customRedisClient;

@@ -8,7 +8,7 @@ import {
 } from "prom-client";
 import { describe, expect, it } from "vitest";
 
-import { CacheLayer, DialCache, DialCacheKeyConfig } from "../src/index.js";
+import { CacheLayer, DialCache, DialCacheKeyConfig, type MetricErrorKind } from "../src/index.js";
 import { PrometheusDialCacheMetrics, createPrometheusDialCacheMetrics } from "../src/prometheus.js";
 import { FakeRedis } from "./fake-redis.js";
 
@@ -29,6 +29,17 @@ const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0
 const GET_TIMER_HELP = "DialCache cache get latency in seconds.";
 const GET_TIMER_LABELS = ["use_case", "key_type", "layer"] as const;
 const CONFIGURED_TIMER_BUCKETS = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10];
+const METRIC_ERROR_KINDS: Readonly<Record<MetricErrorKind, true>> = {
+  key_construction: true,
+  config_resolution: true,
+  cache_read: true,
+  cache_write: true,
+  serialization_load: true,
+  serialization_dump: true,
+  invalidation: true,
+  fallback: true,
+  unknown: true,
+};
 
 interface IncompatibleCollectorCase {
   readonly schemaPart: string;
@@ -114,7 +125,7 @@ describe("Prometheus metrics adapter", () => {
     metrics.request(labels);
     metrics.miss(labels);
     metrics.disabled({ ...labels, reason: "context" });
-    metrics.error({ ...labels, error: "Error", inFallback: false });
+    metrics.error({ ...labels, error: "cache_read", inFallback: false });
     metrics.invalidation({ keyType: labels.keyType, layer: labels.layer });
     metrics.coalesced?.({ useCase: labels.useCase, keyType: labels.keyType, scope: "process" });
     metrics.observeGet(labels, 0.05);
@@ -156,6 +167,33 @@ describe("Prometheus metrics adapter", () => {
       { use_case: labels.useCase, key_type: labels.keyType, layer: labels.layer, operation: "dump" },
       { use_case: labels.useCase, key_type: labels.keyType, layer: labels.layer, operation: "load" },
     ]);
+  });
+
+  it("exports every bounded error category without rewriting labels", async () => {
+    const registry = new Registry();
+    const metrics = new PrometheusDialCacheMetrics({ registry, prefix: "error_kind_" });
+    const labels = {
+      useCase: "PrometheusErrorKinds",
+      keyType: "user_id",
+      layer: CacheLayer.LOCAL,
+    } as const;
+    const errorKinds = Object.keys(METRIC_ERROR_KINDS) as MetricErrorKind[];
+
+    for (const error of errorKinds) {
+      metrics.error({ ...labels, error, inFallback: false });
+    }
+
+    for (const error of errorKinds) {
+      await expect(
+        sumMetric(registry, "error_kind_dialcache_error_counter", {
+          use_case: labels.useCase,
+          key_type: labels.keyType,
+          layer: labels.layer,
+          error,
+          in_fallback: "false",
+        }),
+      ).resolves.toBe(1);
+    }
   });
 
   it("reuses existing collectors when multiple adapters share a registry", async () => {
@@ -288,7 +326,9 @@ describe("Prometheus metrics adapter", () => {
       keyType: "user_id",
       useCase: "PrometheusErrorMetric",
       cacheKey: () => {
-        throw new Error("bad key");
+        const error = new Error("bad key for tenant-123");
+        error.name = "Tenant123KeyError";
+        throw error;
       },
       defaultConfig: localOnly(),
     });
@@ -343,10 +383,11 @@ describe("Prometheus metrics adapter", () => {
       sumMetric(registry, "test_dialcache_error_counter", {
         use_case: "PrometheusErrorMetric",
         layer: "noop",
-        error: "Error",
+        error: "key_construction",
         in_fallback: "false",
       }),
     ).resolves.toBe(1);
+    await expect(registry.metrics()).resolves.not.toMatch(/Tenant123KeyError|tenant-123|bad key/);
     await expect(sumMetric(registry, "test_dialcache_invalidation_counter", { key_type: "user_id", layer: "remote" })).resolves.toBe(1);
     await expect(
       sumMetric(registry, "test_dialcache_coalesced_counter", {

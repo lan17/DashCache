@@ -332,7 +332,7 @@ describe("DialCache targeted invalidation watermarks", () => {
     expect(redis.values.size).toBe(0);
     expect(metrics.events).toContainEqual({
       name: "error",
-      labels: { useCase: "WatermarkReadFailOpen", keyType: "user_id", layer: CacheLayer.REMOTE, error: "Error", inFallback: false },
+      labels: { useCase: "WatermarkReadFailOpen", keyType: "user_id", layer: CacheLayer.REMOTE, error: "cache_read", inFallback: false },
     });
   });
 
@@ -349,6 +349,10 @@ describe("DialCache targeted invalidation watermarks", () => {
     expect(metrics.events).toContainEqual({
       name: "invalidation",
       labels: { keyType: "user_id", layer: CacheLayer.REMOTE },
+    });
+    expect(metrics.events).toContainEqual({
+      name: "error",
+      labels: { useCase: "watermark", keyType: "user_id", layer: CacheLayer.REMOTE, error: "invalidation", inFallback: false },
     });
   });
 

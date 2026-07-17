@@ -495,7 +495,7 @@ describe("DialCache Redis TTL layer", () => {
       useCase: "RedisBadPayloadEncoding",
       keyType: "user_id",
       layer: CacheLayer.REMOTE,
-      error: "DialCacheRedisPayloadEncodingError",
+      error: "cache_read",
       inFallback: false,
     });
     expect(logger.warn).toHaveBeenCalledWith(
@@ -541,7 +541,7 @@ describe("DialCache Redis TTL layer", () => {
       useCase: "RedisFakeBadPayloadEncoding",
       keyType: "user_id",
       layer: CacheLayer.REMOTE,
-      error: "DialCacheRedisPayloadEncodingError",
+      error: "cache_read",
       inFallback: false,
     });
     expect(logger.warn).toHaveBeenCalledWith(

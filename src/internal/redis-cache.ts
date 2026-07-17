@@ -2,9 +2,8 @@ import { performance } from "node:perf_hooks";
 
 import { CacheLayer, DEFAULT_WATERMARK_TTL_SEC, type CacheConfigProvider, type CacheRampSampler, type DialCacheKeyConfig } from "../config.js";
 import { invalidationPrefix, redisClusterHashTag, type DialCacheKey } from "../key.js";
-import type { DialCacheMetricsAdapter } from "../metrics.js";
-import { errorName, labelsFor } from "../metrics.js";
-import type { DialCacheRedisClient, RedisClientFactory } from "../redis-client.js";
+import { labelsFor, type DialCacheMetricsAdapter, type MetricErrorKind } from "../metrics.js";
+import type { DialCacheRedisClient, RedisCachePayload, RedisClientFactory } from "../redis-client.js";
 import { JsonSerializer, type Serializer } from "../serializer.js";
 import type { CacheGetResult } from "./cache-result.js";
 import { fetchKeyConfig, resolveLayerConfigResult, type ResolvedLayerConfig } from "./runtime-config.js";
@@ -75,12 +74,18 @@ export class RedisCache {
   }
 
   async getWithResolvedConfig<T>(key: DialCacheKey, layerConfig: ResolvedLayerConfig): Promise<CacheGetResult<T>> {
-    const client = await this.resolveClient();
-    const redisKey = this.redisKey(key);
-    const payload = await client.read({
-      valueKey: redisKey,
-      ...(key.trackForInvalidation ? { watermarkKey: this.redisWatermarkKeyFromKey(key) } : {}),
-    });
+    let payload: RedisCachePayload | null;
+    try {
+      const client = await this.resolveClient();
+      const redisKey = this.redisKey(key);
+      payload = await client.read({
+        valueKey: redisKey,
+        ...(key.trackForInvalidation ? { watermarkKey: this.redisWatermarkKeyFromKey(key) } : {}),
+      });
+    } catch (error) {
+      this.recordError(key, "cache_read");
+      throw error;
+    }
     if (payload === null) {
       return { status: "miss", config: layerConfig };
     }
@@ -89,8 +94,8 @@ export class RedisCache {
     try {
       const value = (await this.serializerFor(key).load(payload)) as T;
       return { status: "hit", value };
-    } catch (error) {
-      this.recordMetric((metrics) => metrics.error({ ...labelsFor(key, CacheLayer.REMOTE), error: errorName(error), inFallback: false }));
+    } catch {
+      this.recordError(key, "serialization_load");
       return { status: "miss", config: layerConfig };
     } finally {
       this.recordMetric((metrics) => metrics.observeSerialization({ ...labelsFor(key, CacheLayer.REMOTE), operation: "load" }, elapsedSeconds(start)));
@@ -107,28 +112,36 @@ export class RedisCache {
     let serialized: string | Buffer;
     try {
       serialized = await this.serializerFor(key).dump(value);
+    } catch (error) {
+      this.recordError(key, "serialization_dump");
+      throw error;
     } finally {
       this.recordMetric((metrics) => metrics.observeSerialization({ ...labelsFor(key, CacheLayer.REMOTE), operation: "dump" }, elapsedSeconds(start)));
     }
     this.recordMetric((metrics) => metrics.observeSize(labelsFor(key, CacheLayer.REMOTE), payloadSize(serialized)));
 
-    const client = await this.resolveClient();
-    const cacheTtlMs = ttlSec * 1000;
-    if (!Number.isSafeInteger(cacheTtlMs)) {
-      throw new RangeError("Redis cache TTL is too large");
+    try {
+      const client = await this.resolveClient();
+      const cacheTtlMs = ttlSec * 1000;
+      if (!Number.isSafeInteger(cacheTtlMs)) {
+        throw new RangeError("Redis cache TTL is too large");
+      }
+      const request = {
+        valueKey: this.redisKey(key),
+        cacheTtlMs,
+        value: serialized,
+      } as const;
+      return key.trackForInvalidation
+        ? await client.write({
+            ...request,
+            watermarkKey: this.redisWatermarkKeyFromKey(key),
+            watermarkTtlFloorMs: this.watermarkTtlMs,
+          })
+        : await client.write(request);
+    } catch (error) {
+      this.recordError(key, "cache_write");
+      throw error;
     }
-    const request = {
-      valueKey: this.redisKey(key),
-      cacheTtlMs,
-      value: serialized,
-    } as const;
-    return key.trackForInvalidation
-      ? await client.write({
-          ...request,
-          watermarkKey: this.redisWatermarkKeyFromKey(key),
-          watermarkTtlFloorMs: this.watermarkTtlMs,
-        })
-      : await client.write(request);
   }
 
   async invalidate(keyType: string, id: string, futureBufferMs = 0, urnPrefix = "urn"): Promise<void> {
@@ -197,6 +210,10 @@ export class RedisCache {
     } catch {
       // Metrics adapters must not affect cache correctness or application fallbacks.
     }
+  }
+
+  private recordError(key: DialCacheKey, kind: MetricErrorKind): void {
+    this.recordMetric((metrics) => metrics.error({ ...labelsFor(key, CacheLayer.REMOTE), error: kind, inFallback: false }));
   }
 }
 

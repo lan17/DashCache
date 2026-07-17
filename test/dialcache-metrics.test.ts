@@ -9,8 +9,10 @@ import {
   type DisabledMetricLabels,
   type ErrorMetricLabels,
   type DialCacheMetricsAdapter,
+  type DialCacheRedisClient,
   type InvalidationMetricLabels,
   type SerializationMetricLabels,
+  type Serializer,
 } from "../src/index.js";
 import { FakeRedis } from "./fake-redis.js";
 
@@ -244,11 +246,18 @@ describe("DialCache observability metrics", () => {
   });
 
   it("labels cache errors separately from fallback errors", async () => {
-    // Given one Redis-backed cache has a cache read failure and another has a fallback failure.
+    // Given cache and fallback errors carry caller-defined names containing dynamic identifiers.
     const metrics = new RecordingMetrics();
     const logger = { debug: vi.fn(), warn: vi.fn(), error: vi.fn() };
-    const failingRedis = new FakeRedis();
-    failingRedis.failGet = true;
+    const cacheError = new Error("redis key urn:user_id:tenant-123 failed");
+    cacheError.name = "Tenant123RedisError";
+    const failingRedis: DialCacheRedisClient = {
+      read: vi.fn(async () => {
+        throw cacheError;
+      }),
+      write: vi.fn(async () => true),
+      invalidate: vi.fn(async () => undefined),
+    };
     const cacheFailure = new DialCache({ redis: { client: failingRedis }, metrics, logger });
     const readThroughFailure = cacheFailure.cached(async (userId: string) => ({ userId }), {
       keyType: "user_id",
@@ -258,7 +267,9 @@ describe("DialCache observability metrics", () => {
     });
     const fallbackCache = new DialCache({ redis: { client: new FakeRedis() }, metrics, logger });
     const fallbackFailure = fallbackCache.cached(async (userId: string) => {
-      throw new TypeError("database failed");
+      const fallbackError = new TypeError("database failed for tenant-456");
+      fallbackError.name = "Tenant456DatabaseError";
+      throw fallbackError;
     }, {
       keyType: "user_id",
       useCase: "FallbackErrorClassification",
@@ -268,14 +279,14 @@ describe("DialCache observability metrics", () => {
 
     // When the cache error fails open and the fallback error escapes.
     await cacheFailure.enable(async () => await readThroughFailure("123"));
-    await expect(fallbackCache.enable(async () => await fallbackFailure("123"))).rejects.toThrow("database failed");
+    await expect(fallbackCache.enable(async () => await fallbackFailure("123"))).rejects.toThrow("database failed for tenant-456");
 
-    // Then error labels identify whether the failure came from cache plumbing or from the fallback.
+    // Then stable failure sites reach the adapter without raw names, messages, IDs, or Redis keys.
     expect(
       events(metrics, "error", {
         useCase: "CacheErrorClassification",
         layer: CacheLayer.REMOTE,
-        error: "Error",
+        error: "cache_read",
         inFallback: false,
       }),
     ).toHaveLength(1);
@@ -283,7 +294,339 @@ describe("DialCache observability metrics", () => {
       events(metrics, "error", {
         useCase: "FallbackErrorClassification",
         layer: CacheLayer.REMOTE,
-        error: "TypeError",
+        error: "fallback",
+        inFallback: true,
+      }),
+    ).toHaveLength(1);
+    expect(JSON.stringify(events(metrics, "error", {}))).not.toMatch(
+      /Tenant123RedisError|Tenant456DatabaseError|tenant-123|tenant-456|urn:user_id/,
+    );
+  });
+
+  it("classifies config, Redis write, and serializer failures by stable operation", async () => {
+    const metrics = new RecordingMetrics();
+    const logger = { debug: vi.fn(), warn: vi.fn(), error: vi.fn() };
+
+    const configFailure = new DialCache({
+      metrics,
+      logger,
+      rampSampler: () => {
+        throw new Error("tenant-123 ramp source failed");
+      },
+    });
+    const resolveConfig = configFailure.cached(async (id: string) => id, {
+      keyType: "user_id",
+      useCase: "ConfigErrorClassification",
+      cacheKey: (id) => id,
+      defaultConfig: new DialCacheKeyConfig({
+        ttlSec: { [CacheLayer.LOCAL]: 60 },
+        ramp: { [CacheLayer.LOCAL]: 50 },
+      }),
+    });
+    await configFailure.enable(async () => await resolveConfig("123"));
+
+    const failingWriteRedis = new FakeRedis();
+    failingWriteRedis.failSet = true;
+    const writeFailure = new DialCache({ redis: { client: failingWriteRedis }, metrics, logger });
+    const writeValue = writeFailure.cached(async (id: string) => id, {
+      keyType: "user_id",
+      useCase: "WriteErrorClassification",
+      cacheKey: (id) => id,
+      defaultConfig: remoteOnly(),
+    });
+    await writeFailure.enable(async () => await writeValue("123"));
+
+    const dumpError = new Error("tenant-456 serializer dump failed");
+    dumpError.name = "Tenant456DumpError";
+    const dumpSerializer: Serializer<string> = {
+      dump: async () => {
+        throw dumpError;
+      },
+      load: async (value) => value.toString(),
+    };
+    const dumpFailure = new DialCache({ redis: { client: new FakeRedis() }, metrics, logger });
+    const dumpValue = dumpFailure.cached(async (id: string) => id, {
+      keyType: "user_id",
+      useCase: "SerializationDumpClassification",
+      cacheKey: (id) => id,
+      defaultConfig: remoteOnly(),
+      serializer: dumpSerializer,
+    });
+    await dumpFailure.enable(async () => await dumpValue("123"));
+
+    const loadRedis = new FakeRedis();
+    const loadWriter = new DialCache({ redis: { client: loadRedis } });
+    const writeLoadFixture = loadWriter.cached(async (id: string) => id, {
+      keyType: "user_id",
+      useCase: "SerializationLoadClassification",
+      cacheKey: (id) => id,
+      defaultConfig: remoteOnly(),
+    });
+    await loadWriter.enable(async () => await writeLoadFixture("123"));
+    const loadError = new Error("tenant-789 serializer load failed");
+    loadError.name = "Tenant789LoadError";
+    const loadSerializer: Serializer<string> = {
+      dump: async (value) => value,
+      load: async () => {
+        throw loadError;
+      },
+    };
+    const loadFailure = new DialCache({ redis: { client: loadRedis }, metrics, logger });
+    const loadValue = loadFailure.cached(async (id: string) => id, {
+      keyType: "user_id",
+      useCase: "SerializationLoadClassification",
+      cacheKey: (id) => id,
+      defaultConfig: remoteOnly(),
+      serializer: loadSerializer,
+    });
+    await loadFailure.enable(async () => await loadValue("123"));
+
+    expect(
+      events(metrics, "error", {
+        useCase: "ConfigErrorClassification",
+        layer: CacheLayer.LOCAL,
+        error: "config_resolution",
+        inFallback: false,
+      }),
+    ).toHaveLength(1);
+    expect(
+      events(metrics, "error", {
+        useCase: "WriteErrorClassification",
+        layer: CacheLayer.REMOTE,
+        error: "cache_write",
+        inFallback: false,
+      }),
+    ).toHaveLength(1);
+    expect(
+      events(metrics, "error", {
+        useCase: "SerializationDumpClassification",
+        layer: CacheLayer.REMOTE,
+        error: "serialization_dump",
+        inFallback: false,
+      }),
+    ).toHaveLength(1);
+    expect(
+      events(metrics, "error", {
+        useCase: "SerializationDumpClassification",
+        layer: CacheLayer.REMOTE,
+        error: "cache_write",
+        inFallback: false,
+      }),
+    ).toHaveLength(0);
+    expect(
+      events(metrics, "error", {
+        useCase: "SerializationLoadClassification",
+        layer: CacheLayer.REMOTE,
+        error: "serialization_load",
+        inFallback: false,
+      }),
+    ).toHaveLength(1);
+    expect(JSON.stringify(events(metrics, "error", {}))).not.toMatch(
+      /Tenant456DumpError|Tenant789LoadError|tenant-456|tenant-789/,
+    );
+  });
+
+  it("classifies provider and remote layer config failures", async () => {
+    const metrics = new RecordingMetrics();
+    const logger = { debug: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const providerError = new Error("config provider failed for tenant-123");
+    providerError.name = "Tenant123ConfigProviderError";
+    const providerFailure = new DialCache({
+      metrics,
+      logger,
+      cacheConfigProvider: async () => {
+        throw providerError;
+      },
+    });
+    const resolveProviderConfig = providerFailure.cached(async (id: string) => id, {
+      keyType: "user_id",
+      useCase: "ProviderConfigErrorClassification",
+      cacheKey: (id) => id,
+      defaultConfig: localOnly(),
+    });
+
+    const remoteError = new Error("remote ramp failed for tenant-456");
+    remoteError.name = "Tenant456RemoteRampError";
+    const remoteFailure = new DialCache({
+      redis: { client: new FakeRedis() },
+      metrics,
+      logger,
+      rampSampler: ({ layer }) => {
+        if (layer === CacheLayer.REMOTE) {
+          throw remoteError;
+        }
+        return 0;
+      },
+    });
+    const resolveRemoteConfig = remoteFailure.cached(async (id: string) => id, {
+      keyType: "user_id",
+      useCase: "RemoteConfigErrorClassification",
+      cacheKey: (id) => id,
+      defaultConfig: new DialCacheKeyConfig({
+        ttlSec: { [CacheLayer.REMOTE]: 60 },
+        ramp: { [CacheLayer.REMOTE]: 50 },
+      }),
+    });
+
+    await providerFailure.enable(async () => await resolveProviderConfig("123"));
+    await remoteFailure.enable(async () => await resolveRemoteConfig("456"));
+
+    expect(
+      events(metrics, "error", {
+        useCase: "ProviderConfigErrorClassification",
+        layer: "noop",
+        error: "config_resolution",
+        inFallback: false,
+      }),
+    ).toHaveLength(1);
+    expect(
+      events(metrics, "error", {
+        useCase: "RemoteConfigErrorClassification",
+        layer: CacheLayer.REMOTE,
+        error: "config_resolution",
+        inFallback: false,
+      }),
+    ).toHaveLength(1);
+    expect(JSON.stringify(events(metrics, "error", {}))).not.toMatch(
+      /Tenant123ConfigProviderError|Tenant456RemoteRampError|tenant-123|tenant-456/,
+    );
+  });
+
+  it("classifies local cache reads and writes", async () => {
+    const metrics = new RecordingMetrics();
+    const logger = { debug: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const readFailure = new DialCache({ metrics, logger });
+    const readLocalCache = (readFailure as unknown as {
+      readonly localCache: { getWithResolvedConfig: () => unknown };
+    }).localCache;
+    vi.spyOn(readLocalCache, "getWithResolvedConfig").mockImplementationOnce(() => {
+      throw new Error("local read failed");
+    });
+    const readValue = readFailure.cached(async (id: string) => id, {
+      keyType: "user_id",
+      useCase: "LocalReadErrorClassification",
+      cacheKey: (id) => id,
+      defaultConfig: localOnly(),
+    });
+
+    const writeFailure = new DialCache({ metrics, logger });
+    const writeLocalCache = (writeFailure as unknown as {
+      readonly localCache: { put: () => Promise<void> };
+    }).localCache;
+    vi.spyOn(writeLocalCache, "put").mockRejectedValueOnce(new Error("local write failed"));
+    const writeValue = writeFailure.cached(async (id: string) => id, {
+      keyType: "user_id",
+      useCase: "LocalWriteErrorClassification",
+      cacheKey: (id) => id,
+      defaultConfig: localOnly(),
+    });
+
+    await readFailure.enable(async () => await readValue("123"));
+    await writeFailure.enable(async () => await writeValue("456"));
+
+    expect(
+      events(metrics, "error", {
+        useCase: "LocalReadErrorClassification",
+        layer: CacheLayer.LOCAL,
+        error: "cache_read",
+        inFallback: false,
+      }),
+    ).toHaveLength(1);
+    expect(
+      events(metrics, "error", {
+        useCase: "LocalWriteErrorClassification",
+        layer: CacheLayer.LOCAL,
+        error: "cache_write",
+        inFallback: false,
+      }),
+    ).toHaveLength(1);
+  });
+
+  it("labels fallback errors with every reachable metric layer", async () => {
+    const metrics = new RecordingMetrics();
+    const noopFailure = new DialCache({ metrics });
+    const noopFallback = noopFailure.cached(async () => {
+      throw new Error("noop fallback failed");
+    }, {
+      keyType: "user_id",
+      useCase: "NoopFallbackErrorClassification",
+      cacheKey: () => {
+        throw new Error("key construction failed");
+      },
+      defaultConfig: localOnly(),
+    });
+    const requestLocalFailure = new DialCache({ metrics });
+    const requestLocalFallback = requestLocalFailure.cached(async (_id: string) => {
+      throw new Error("request-local fallback failed");
+    }, {
+      keyType: "user_id",
+      useCase: "RequestLocalFallbackErrorClassification",
+      cacheKey: (id: string) => id,
+      defaultConfig: new DialCacheKeyConfig({ requestLocal: true }),
+    });
+    const localFailure = new DialCache({ metrics });
+    const localFallback = localFailure.cached(async (_id: string) => {
+      throw new Error("local fallback failed");
+    }, {
+      keyType: "user_id",
+      useCase: "LocalFallbackErrorClassification",
+      cacheKey: (id: string) => id,
+      defaultConfig: localOnly(),
+    });
+    const remoteFailure = new DialCache({ redis: { client: new FakeRedis() }, metrics });
+    const remoteFallback = remoteFailure.cached(async (_id: string) => {
+      throw new Error("remote fallback failed");
+    }, {
+      keyType: "user_id",
+      useCase: "RemoteFallbackErrorClassification",
+      cacheKey: (id: string) => id,
+      defaultConfig: remoteOnly(),
+    });
+
+    await expect(noopFailure.enable(async () => await noopFallback())).rejects.toThrow("noop fallback failed");
+    await expect(requestLocalFailure.enable(async () => await requestLocalFallback("123"))).rejects.toThrow(
+      "request-local fallback failed",
+    );
+    await expect(localFailure.enable(async () => await localFallback("123"))).rejects.toThrow("local fallback failed");
+    await expect(remoteFailure.enable(async () => await remoteFallback("123"))).rejects.toThrow("remote fallback failed");
+
+    expect(
+      events(metrics, "error", {
+        useCase: "NoopFallbackErrorClassification",
+        layer: "noop",
+        error: "key_construction",
+        inFallback: false,
+      }),
+    ).toHaveLength(1);
+    expect(
+      events(metrics, "error", {
+        useCase: "NoopFallbackErrorClassification",
+        layer: "noop",
+        error: "fallback",
+        inFallback: true,
+      }),
+    ).toHaveLength(1);
+    expect(
+      events(metrics, "error", {
+        useCase: "RequestLocalFallbackErrorClassification",
+        layer: "request_local",
+        error: "fallback",
+        inFallback: true,
+      }),
+    ).toHaveLength(1);
+    expect(
+      events(metrics, "error", {
+        useCase: "LocalFallbackErrorClassification",
+        layer: CacheLayer.LOCAL,
+        error: "fallback",
+        inFallback: true,
+      }),
+    ).toHaveLength(1);
+    expect(
+      events(metrics, "error", {
+        useCase: "RemoteFallbackErrorClassification",
+        layer: CacheLayer.REMOTE,
+        error: "fallback",
         inFallback: true,
       }),
     ).toHaveLength(1);
