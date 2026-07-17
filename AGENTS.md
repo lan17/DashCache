@@ -2,7 +2,7 @@
 
 ## Project overview
 
-DialCache is a TypeScript caching library with explicit request-scoped enablement, local and Redis layers, runtime rollout controls, request coalescing, targeted invalidation, and Prometheus-compatible observability.
+DialCache is a TypeScript caching library with explicit request-scoped enablement, local and Redis layers, runtime rollout controls, request coalescing, targeted invalidation, and adapter-based observability.
 
 ## Structure
 
@@ -12,7 +12,8 @@ src/
   config.ts             # Public configuration and rollout types
   context.ts            # AsyncLocalStorage-based enabled context
   key.ts                # Structured cache keys and Redis hash tags
-  metrics.ts            # Metrics adapter and Prometheus implementation
+  metrics.ts            # Backend-neutral metrics adapter contract
+  prometheus.ts         # Optional Prometheus adapter
   redis-client.ts       # Client-independent semantic Redis interface
   node-redis.ts          # node-redis adapter and script registration
   redis-protocol.ts      # Public Lua protocol exports
@@ -36,7 +37,7 @@ test/                   # Unit and Redis integration tests
 
 - Preserve strict TypeScript settings and public abstraction boundaries.
 - Keep Redis client-specific behavior in adapters; core code depends on `DialCacheRedisClient`.
-- Public exports belong in `src/index.ts`, `src/node-redis.ts`, or `src/redis-protocol.ts`.
+- Public exports belong in the root or an explicit integration entry point such as `src/node-redis.ts`, `src/prometheus.ts`, or `src/redis-protocol.ts`.
 - Use `corepack pnpm` for project commands.
 
 ## Validation

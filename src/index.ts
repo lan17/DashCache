@@ -1,7 +1,6 @@
 export { CacheLayer, DEFAULT_WATERMARK_TTL_SEC, DialCacheKeyConfig, deterministicRampSampler, randomRampSampler } from "./config.js";
 export type { CacheConfigProvider, CacheRampSample, CacheRampSampler, DialCacheConfig, LayerConfig, Logger } from "./config.js";
 export { DialCacheContext } from "./context.js";
-export { PrometheusDialCacheMetrics, createPrometheusDialCacheMetrics } from "./metrics.js";
 export type {
   CacheMetricLabels,
   CoalescedMetricLabels,
@@ -12,7 +11,6 @@ export type {
   DialCacheMetricsAdapter,
   InvalidationMetricLabels,
   MetricLayer,
-  PrometheusMetricsOptions,
   SerializationMetricLabels,
 } from "./metrics.js";
 export {

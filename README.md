@@ -3,7 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/dialcache.svg)](https://www.npmjs.com/package/dialcache)
 [![Codecov](https://codecov.io/gh/lan17/DialCache/branch/main/graph/badge.svg)](https://codecov.io/gh/lan17/DialCache)
 
-Fine-grained TypeScript caching with explicit enabled contexts, request-local memoization, process-local and Redis TTL caching, stable key construction, runtime rollout controls, request coalescing, Prometheus-ready observability, and Redis watermark-based targeted invalidation.
+Fine-grained TypeScript caching with explicit enabled contexts, request-local memoization, process-local and Redis TTL caching, stable key construction, runtime rollout controls, request coalescing, adapter-based observability, and Redis watermark-based targeted invalidation.
 
 ## Install
 
@@ -13,6 +13,8 @@ pnpm add dialcache
 pnpm add redis@~4.7.1
 # or
 pnpm add @valkey/valkey-glide@^2.4.2
+# Add a metrics client only when using its adapter:
+pnpm add prom-client@^15.1.3
 ```
 
 DialCache requires Node.js 20 or Node.js 22 and newer.
@@ -374,7 +376,37 @@ Use a narrower copy when its semantics are sufficient; the ownership boundary is
 
 ## Metrics
 
-DialCache registers Prometheus metrics by default via `prom-client`:
+Metrics are disabled unless a `DialCacheMetricsAdapter` is passed to the constructor. `new DialCache()` does not import a metrics backend, register collectors, or emit metrics.
+
+### Prometheus
+
+Install `prom-client` separately, create the registry your application owns, and pass the explicit Prometheus adapter to DialCache:
+
+```bash
+pnpm add prom-client@^15.1.3
+```
+
+```ts
+import { Registry } from "prom-client";
+import { DialCache } from "dialcache";
+import { createPrometheusDialCacheMetrics } from "dialcache/prometheus";
+
+const registry = new Registry();
+const dialcache = new DialCache({
+  metrics: createPrometheusDialCacheMetrics({
+    registry,
+    prefix: "myapp_", // myapp_dialcache_request_counter, etc.
+  }),
+});
+
+app.get("/metrics", async (_req, res) => {
+  res.type(registry.contentType).send(await registry.metrics());
+});
+```
+
+The adapter requires a caller-owned `Registry`; it never uses the global default registry and does not clear or otherwise own the registry lifecycle. Multiple adapters with the same registry and prefix reuse existing collectors when their type, help, labels, histogram buckets, and exemplar mode match. Adapter construction fails before registering anything if a same-name collector has an incompatible schema; use a unique prefix or a separate registry to resolve the collision.
+
+The Prometheus adapter emits:
 
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
@@ -391,24 +423,18 @@ DialCache registers Prometheus metrics by default via `prom-client`:
 
 The `layer` label is `request_local`, `local` (process-local), or `remote`. Disabled-context, key-construction, and config-provider failures use `noop` because no cache layer was reached. The bounded `scope` label on `dialcache_coalesced_counter` distinguishes request-local from instance-scoped single-flight work. `scope="process"` coordinates calls only within one `DialCache` instance; separate instances in the same process do not share in-flight state.
 
-Use a custom registry or prefix when embedding DialCache in an app with its own metrics endpoint:
+### Custom adapters
 
-```ts
-import { Registry } from "prom-client";
-import { DialCache } from "dialcache";
+For other telemetry backends, implement `DialCacheMetricsAdapter` and pass the adapter through `new DialCache({ metrics })`. Synchronous adapter failures are isolated from cache behavior and application fallbacks. Omit `metrics` to disable metrics.
 
-const registry = new Registry();
-const dialcache = new DialCache({
-  metricsRegistry: registry,
-  metricsPrefix: "myapp_", // myapp_dialcache_request_counter, etc.
-});
+### Migrating from implicit Prometheus metrics
 
-app.get("/metrics", async (_req, res) => {
-  res.type(registry.contentType).send(await registry.metrics());
-});
-```
-
-For non-Prometheus telemetry, inject a `DialCacheMetricsAdapter` through `new DialCache({ metrics })`. Pass `metrics: false` to disable metrics entirely. DialCache reuses existing collectors in a registry so repeated instances with the same prefix do not throw duplicate-registration errors.
+| Before | After |
+| --- | --- |
+| `new DialCache()` registered Prometheus collectors | `new DialCache()` has metrics disabled |
+| `new DialCache({ metrics: false })` | `new DialCache()` |
+| `new DialCache({ metricsRegistry, metricsPrefix })` | `new DialCache({ metrics: createPrometheusDialCacheMetrics({ registry, prefix }) })` |
+| Prometheus imports from `dialcache` | Prometheus imports from `dialcache/prometheus` |
 
 ## Current scope
 
@@ -431,8 +457,8 @@ Included:
 - Per-layer TTL and ramp controls
 - Deterministic default ramp sampler with injectable override hooks
 - Missing config disables only the relevant layer and falls through
-- Prometheus metrics with duplicate-registration safety
-- Custom metrics adapter/registry/prefix hooks
+- Optional Prometheus adapter with caller-owned registries and duplicate-registration safety
+- Backend-neutral custom metrics adapter hook; metrics are disabled when omitted
 - Cache-vs-fallback error classification through the `in_fallback` label
 - Serialization latency and cached payload size metrics for Redis values
 - Logger injection for cache operational failures

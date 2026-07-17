@@ -16,7 +16,6 @@ import { DialCacheKey, normalizeArgs } from "./key.js";
 import {
   NO_CACHE_LAYER,
   REQUEST_LOCAL_CACHE_LAYER,
-  createPrometheusDialCacheMetrics,
   errorName,
   labelsFor,
   type CacheMetricLabels,
@@ -157,15 +156,7 @@ export class DialCache {
     this.urnPrefix = config.urnPrefix ?? "urn";
     this.logger = config.logger ?? defaultLogger;
     this.rampSampler = config.rampSampler ?? deterministicRampSampler;
-    const metrics =
-      config.metrics === false
-        ? null
-        : config.metrics ??
-          createPrometheusDialCacheMetrics({
-            prefix: config.metricsPrefix ?? "",
-            ...(config.metricsRegistry === undefined ? {} : { registry: config.metricsRegistry }),
-          });
-    this.metrics = safeMetrics(metrics);
+    this.metrics = safeMetrics(config.metrics ?? null);
     this.localCache = new LocalCache(this.configProvider, this.rampSampler, localMaxSize);
     this.redisCache =
       config.redis === undefined

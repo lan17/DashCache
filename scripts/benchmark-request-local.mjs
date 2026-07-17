@@ -26,7 +26,7 @@ console.table(
 console.log("Semantic assertions passed; elapsed times are informational and have no pass/fail threshold.");
 
 async function benchmarkSequentialRequestLocalHits(iterations) {
-  const dialcache = new DialCache({ metrics: false });
+  const dialcache = new DialCache();
   let fallbackCalls = 0;
   const getValue = dialcache.cached(
     async (id) => {
@@ -58,7 +58,7 @@ async function benchmarkSequentialRequestLocalHits(iterations) {
 }
 
 async function benchmarkRequestLocalCoalescing(fanout) {
-  const dialcache = new DialCache({ metrics: false });
+  const dialcache = new DialCache();
   const gate = deferred();
   const started = deferred();
   let fallbackCalls = 0;
@@ -94,7 +94,7 @@ async function benchmarkRequestLocalCoalescing(fanout) {
 }
 
 async function benchmarkProcessCoalescing(fanout) {
-  const dialcache = new DialCache({ metrics: false });
+  const dialcache = new DialCache();
   const gate = deferred();
   const started = deferred();
   let fallbackCalls = 0;
