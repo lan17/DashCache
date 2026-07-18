@@ -421,6 +421,12 @@ describe("DialCache observability metrics", () => {
         inFallback: false,
       }),
     ).toHaveLength(1);
+    expect(
+      events(metrics, "miss", {
+        useCase: "SerializationLoadClassification",
+        layer: CacheLayer.REMOTE,
+      }),
+    ).toHaveLength(1);
     expect(JSON.stringify(events(metrics, "error", {}))).not.toMatch(
       /Tenant456DumpError|Tenant789LoadError|tenant-456|tenant-789/,
     );
