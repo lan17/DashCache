@@ -255,6 +255,7 @@ export class DialCache {
    * Writes a remote invalidation watermark for Redis-tracked entries.
    *
    * This does not synchronously evict local cache hits or untracked Redis values.
+   * Call it only after the source mutation commits.
    *
    * `futureBufferMs` is an application-owned safety window. Size it to cover
    * source visibility lag plus the full remaining lifetime of fallback work
@@ -264,8 +265,13 @@ export class DialCache {
    * There is no universally safe library value. A zero buffer provides no
    * stale-publication protection once Redis time advances; an undersized buffer
    * may allow stale data to repopulate Redis. An oversized buffer temporarily
-   * converts more tracked reads into misses and suppresses their cache writes,
-   * but does not delay or suppress returning fallback values to callers.
+   * converts more tracked Redis reads into misses and rejects their tracked
+   * writes, but does not delay or suppress returning fallback values.
+   *
+   * The watermark fences only invocations that reach the tracked Redis write.
+   * A rejected write also suppresses the corresponding process-local population.
+   * Request-local memoization remains unconditional, and invocations whose
+   * remote layer is disabled or ramped out are not fenced by the watermark.
    *
    * @param futureBufferMs Nonnegative safe integer; defaults to zero for backward compatibility.
    */
