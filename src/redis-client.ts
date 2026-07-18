@@ -18,9 +18,12 @@ export class DialCacheRedisPayloadEncodingError extends Error {
 
 export class DialCacheRedisProtocolError extends Error {
   static [Symbol.hasInstance](value: unknown): boolean {
+    if (this !== DialCacheRedisProtocolError) {
+      return Function.prototype[Symbol.hasInstance].call(this, value);
+    }
     return typeof value === "object"
       && value !== null
-      && Object.prototype.hasOwnProperty.call(value, redisProtocolErrorBrand);
+      && Object.getOwnPropertyDescriptor(value, redisProtocolErrorBrand)?.value === true;
   }
 
   constructor(message: string) {

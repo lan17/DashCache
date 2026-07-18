@@ -172,6 +172,24 @@ describe("node-redis adapter", () => {
     }
   });
 
+  it("keeps protocol error instanceof checks specific to the base class and subclasses", () => {
+    class SpecializedProtocolError extends DialCacheRedisProtocolError {}
+
+    const baseError = new DialCacheRedisProtocolError("base");
+    const specializedError = new SpecializedProtocolError("specialized");
+    const falselyBranded = Object.defineProperty(
+      {},
+      Symbol.for("dialcache.DialCacheRedisProtocolError"),
+      { value: false },
+    );
+
+    expect(baseError).toBeInstanceOf(DialCacheRedisProtocolError);
+    expect(baseError).not.toBeInstanceOf(SpecializedProtocolError);
+    expect(specializedError).toBeInstanceOf(SpecializedProtocolError);
+    expect(specializedError).toBeInstanceOf(DialCacheRedisProtocolError);
+    expect(falselyBranded).not.toBeInstanceOf(DialCacheRedisProtocolError);
+  });
+
   it("surfaces protocol failures through the normal DialCache observability path", async () => {
     const redisClient = createNodeRedisDialCacheClient(fakeClient({ write: 2, invalidate: 0 }) as never);
     const logger = { debug: vi.fn(), warn: vi.fn(), error: vi.fn() };
