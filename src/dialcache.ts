@@ -154,7 +154,7 @@ export class DialCache {
 
     this.configProvider = config.cacheConfigProvider ?? defaultConfigProvider;
     this.urnPrefix = config.urnPrefix ?? "urn";
-    this.logger = config.logger ?? defaultLogger;
+    this.logger = safeLogger(config.logger ?? defaultLogger);
     this.rampSampler = config.rampSampler ?? deterministicRampSampler;
     this.metrics = safeMetrics(config.metrics ?? null);
     this.localCache = new LocalCache(this.configProvider, this.rampSampler, localMaxSize);
@@ -557,6 +557,22 @@ function elapsedSeconds(startMs: number): number {
 function assertValidFutureBufferMs(futureBufferMs: number): void {
   if (!Number.isSafeInteger(futureBufferMs) || futureBufferMs < 0) {
     throw new RangeError("DialCache invalidation futureBufferMs must be a nonnegative safe integer");
+  }
+}
+
+function safeLogger(logger: Logger): Logger {
+  return {
+    debug: (...args: Parameters<Logger["debug"]>) => callLogger(() => logger.debug(...args)),
+    error: (...args: Parameters<Logger["error"]>) => callLogger(() => logger.error(...args)),
+    warn: (...args: Parameters<Logger["warn"]>) => callLogger(() => logger.warn(...args)),
+  };
+}
+
+function callLogger(log: () => void): void {
+  try {
+    log();
+  } catch {
+    // Injected loggers must not affect cache correctness or application fallbacks.
   }
 }
 
