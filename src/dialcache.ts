@@ -255,8 +255,25 @@ export class DialCache {
    * Writes a remote invalidation watermark for Redis-tracked entries.
    *
    * This does not synchronously evict local cache hits or untracked Redis values.
+   * Call it only after the source mutation commits.
    *
-   * @param futureBufferMs Nonnegative safe integer covering source lag and stale fallback work through the Redis write.
+   * `futureBufferMs` is an application-owned safety window. Size it to cover
+   * source visibility lag plus the full remaining lifetime of fallback work
+   * that may already have observed stale data, including serializer dump,
+   * Redis client queue and network latency, script execution, the write itself,
+   * and a safety margin.
+   * There is no universally safe library value. A zero buffer provides no
+   * stale-publication protection once Redis time advances; an undersized buffer
+   * may allow stale data to repopulate Redis. An oversized buffer temporarily
+   * converts more tracked Redis reads into misses and rejects their tracked
+   * writes, but does not delay or suppress returning fallback values.
+   *
+   * The watermark fences only invocations that reach the tracked Redis write.
+   * A rejected write also suppresses the corresponding process-local population.
+   * Request-local memoization remains unconditional, and invocations whose
+   * remote layer is disabled or ramped out are not fenced by the watermark.
+   *
+   * @param futureBufferMs Nonnegative safe integer; defaults to zero for backward compatibility.
    */
   async invalidateRemote(keyType: string, id: Id, futureBufferMs = 0): Promise<void> {
     assertValidFutureBufferMs(futureBufferMs);

@@ -229,13 +229,16 @@ This guard is deliberately conservative and is not a proof of runtime data. Type
 
 ## Targeted invalidation and watermarks
 
-Mutable Redis-backed use cases can opt into targeted invalidation by setting `trackForInvalidation: true` in the options and calling `dialcache.invalidateRemote(keyType, id)` after writes:
+Mutable Redis-backed use cases can opt into targeted invalidation by setting `trackForInvalidation: true` in the options and calling `dialcache.invalidateRemote(keyType, id, futureBufferMs)` after writes. The buffer is an application-owned safety value; DialCache cannot choose a universally safe nonzero value:
 
 ```ts
 import { CacheLayer, DialCache, DialCacheKeyConfig } from "dialcache";
 import { createNodeRedisDialCacheClient } from "dialcache/node-redis";
 
 const dialcache = new DialCache({ redis: { client: createNodeRedisDialCacheClient(redisClient) } });
+
+// Chosen from this application's measured worst-case source and fallback timings.
+const USER_INVALIDATION_BUFFER_MS = 5_000;
 
 const getUser = dialcache.cached(
   (userId: string) => db.fetchUser(userId),
@@ -253,18 +256,22 @@ const getUser = dialcache.cached(
 );
 
 await updateUser("123", patch);
-await dialcache.invalidateRemote("user_id", "123");
+await dialcache.invalidateRemote("user_id", "123", USER_INVALIDATION_BUFFER_MS);
 ```
 
 Invalidation writes a Redis watermark at `{encodedUrnPrefix:encodedKeyType:encodedId}#watermark`. Tracked Redis cache entries use the same Redis Cluster hash tag, for example `{urn:user_id:123}?locale=en#GetMutableUser:dialcache-frame-v1`, so the value key and watermark key live in the same slot. Key components are percent-encoded before joining so delimiters inside IDs or args cannot collide with delimiters in the key format. Components may not contain `{` or `}` because those characters would corrupt the hash tag.
 
 The internal `:dialcache-frame-v1` suffix identifies values written with DialCache's binary protocol. Watermarks are stored as decimal timestamps.
 
-A cached Redis value whose Redis-created timestamp is older than or equal to the watermark is treated as stale and refreshed through fallback. `invalidateRemote(keyType, id, futureBufferMs)` sets the watermark to the greater of its existing value and Redis's current time plus the buffer. While that future window is active, fallback results are returned but not written to Redis or the process-local cache.
+A cached Redis value whose Redis-created timestamp is older than or equal to the watermark is treated as stale and refreshed through fallback. `invalidateRemote(keyType, id, futureBufferMs)` sets the watermark to the greater of its existing value and Redis's current time plus the buffer. While that future window is active, an invocation that reaches the tracked Redis read treats the covered value as a miss. If its fallback then reaches the tracked Redis write, Redis rejects the write and DialCache also suppresses the corresponding process-local population; the fallback value still returns to its caller. Request-local memoization remains unconditional, and invocations whose remote layer is disabled or ramped out do not consult the watermark and are not fenced by it.
 
 Tracked writes create a baseline watermark and extend its TTL to at least the value TTL plus one minute. Invalidation preserves that lifetime and extends it to cover the future buffer. `DEFAULT_WATERMARK_TTL_SEC` (4 hours) remains a configurable floor rather than a maximum, and reads do not extend watermark lifetime.
 
-`futureBufferMs` must be a nonnegative safe integer. Size it to cover the longest interval from invalidation until any fallback that could have read stale source data completes its Redis write. Include source-replication lag, remaining fallback work, `serializer.dump`, Redis client queue/network latency, script execution, and a safety margin. Invalidate after the source mutation commits. The buffer prevents stale fallback results from being cached under those assumptions; it does not itself force the current fallback to read from an authoritative source.
+`futureBufferMs` must be a nonnegative safe integer. The default remains zero for backward compatibility, but zero provides no stale-publication protection once Redis time advances. Every production invalidation should pass a named, application-owned nonzero value based on that application's measured or conservatively bounded timings; there is no universally safe library value.
+
+Size the buffer to cover the complete interval in which stale data could still reach the Redis write: source visibility or replication lag, plus the full remaining tail of any fallback that may already have observed the pre-mutation value, `serializer.dump`, Redis client queue and network latency, Lua script execution, the write itself, and a safety margin. Invalidate only after the source mutation commits. Underestimating this interval can allow a delayed stale fallback to repopulate Redis after the watermark window ends. Overestimating it lengthens the tracked Redis miss/write-suppression window described above, increasing fallback load without publishing stale values. A larger buffer does not delay or suppress returning fallback values to callers.
+
+This is a timing contract rather than a cancellation or acquisition fence: the buffer prevents stale fallback results from passing that tracked Redis write only while the configured window remains active, and it does not force a fallback to read from an authoritative source.
 
 Targeted invalidation is remote-only and enforced by Redis watermarks. `invalidateRemote` does not evict existing request-local or process-local entries. Strongly invalidated mutable data should disable request-local and process-local caching (or use a very short process-local TTL only when stale reads are acceptable).
 
@@ -359,7 +366,7 @@ const searchPosts = dialcache.cached(
 await dialcache.enable(() => searchPosts("u1", 2, "active"));
 ```
 
-- **`keyType` + `id` is the invalidation unit for tracked Redis entries.** `dialcache.invalidateRemote("user_id", "123")` writes one watermark for that user; any `trackForInvalidation` Redis entry with the same `keyType` and `id` is refreshed across all `args` variants when Redis is read. Existing request-local and process-local hits follow the limitation above, and untracked Redis entries do not consult the watermark. `useCase` identifies the individual cache (it's the metrics label and part of the stored key).
+- **`keyType` + `id` is the invalidation unit for tracked Redis entries.** `dialcache.invalidateRemote("user_id", "123", USER_INVALIDATION_BUFFER_MS)` writes one watermark for that user; any `trackForInvalidation` Redis entry with the same `keyType` and `id` is refreshed across all `args` variants when Redis is read. Existing request-local and process-local hits follow the limitation above, and untracked Redis entries do not consult the watermark. `useCase` identifies the individual cache (it's the metrics label and part of the stored key).
 - **`args` are part of the cache key** — different `args` produce different entries — but invalidation is by `id` only.
 - **Scalar key equality is string-based.** Runtime type is not an identity dimension: for matching surrounding dimensions, numeric `1`, string `"1"`, and bigint `1n` identify the same key; argument values `null` and `"null"` also match. `-0` matches `0`, and an `undefined` argument is omitted. If a deployment changes the logical meaning represented by a scalar, change an explicit identity dimension such as `keyType`, `useCase`, or an argument name/value.
 - **Non-key inputs** (for example a db handle) are simply parameters the `cacheKey` selector ignores. They still reach `fn` for non-coalesced executions, but concurrent same-key cache misses share the leader's execution, so do not ignore values like `AbortSignal`, auth context, locale, or other request-scoped inputs unless sharing one result is correct.
