@@ -198,6 +198,7 @@ const customRedisClient: DialCacheRedisClient = {
   invalidate: async () => undefined,
 };
 const cacheHasNoFlushAll: "flushAll" extends keyof DialCache ? false : true = true;
+const cacheHasNoClose: "close" extends keyof DialCache ? false : true = true;
 const clientHasNoFlushAll: "flushAll" extends keyof DialCacheRedisClient ? false : true = true;
 const configHasNoMetricsRegistry: "metricsRegistry" extends keyof DialCacheConfig ? false : true = true;
 const configHasNoMetricsPrefix: "metricsPrefix" extends keyof DialCacheConfig ? false : true = true;
@@ -209,6 +210,14 @@ const legacyNamespaceConfig: DialCacheConfig = { urnPrefix: "consumer-cache" };
 const redisConfigHasNoKeyPrefix: "keyPrefix" extends keyof RedisConfig ? false : true = true;
 // @ts-expect-error keyPrefix was removed in favor of DialCacheConfig.namespace.
 const legacyKeyPrefixConfig: RedisConfig = { client: customRedisClient, keyPrefix: "legacy:" };
+const redisConfigRequiresClient: {} extends Pick<RedisConfig, "client"> ? false : true = true;
+const redisConfigHasNoCreateClient: "createClient" extends keyof RedisConfig ? false : true = true;
+// @ts-expect-error Redis requires a caller-owned client.
+const missingRedisClientConfig: RedisConfig = {};
+// @ts-expect-error createClient was removed; construct and pass RedisConfig.client instead.
+const legacyRedisFactoryConfig: RedisConfig = { createClient: () => customRedisClient };
+// @ts-expect-error RedisClientFactory was removed with RedisConfig.createClient.
+type LegacyRedisClientFactory = import("dialcache").RedisClientFactory;
 type DialCacheRoot = typeof import("dialcache");
 const rootHasNoPrometheusFactory: "createPrometheusDialCacheMetrics" extends keyof DialCacheRoot ? false : true = true;
 const rootHasNoDatadogFactory: "createDatadogDialCacheMetrics" extends keyof DialCacheRoot ? false : true = true;
@@ -248,6 +257,7 @@ const cacheWithGlobalSerializer = new DialCache({
 // @ts-expect-error A global serializer cannot establish per-function Date compatibility.
 cacheWithGlobalSerializer.cached(async (_id: string) => new Date(0), optionsFor("GlobalSerializerNeedsTypedOverride"));
 void cacheHasNoFlushAll;
+void cacheHasNoClose;
 void clientHasNoFlushAll;
 void configHasNoMetricsRegistry;
 void configHasNoMetricsPrefix;
@@ -257,6 +267,10 @@ void configHasNoUrnPrefix;
 void legacyNamespaceConfig;
 void redisConfigHasNoKeyPrefix;
 void legacyKeyPrefixConfig;
+void redisConfigRequiresClient;
+void redisConfigHasNoCreateClient;
+void missingRedisClientConfig;
+void legacyRedisFactoryConfig;
 void rootHasNoPrometheusFactory;
 void rootHasNoDatadogFactory;
 void datadogMetrics;

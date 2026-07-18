@@ -149,6 +149,10 @@ interface NodeRedisScriptClient {
   dialcacheInvalidate(watermarkKey: string, futureBufferMs: number, watermarkTtlFloorMs: number): Promise<number>;
 }
 
+/**
+ * Create a resource-free semantic view over a caller-owned node-redis client.
+ * The caller remains responsible for draining work and closing the client.
+ */
 export function createNodeRedisDialCacheClient(client: NodeRedisScriptClient): DialCacheRedisClient {
   return {
     async read({ valueKey, watermarkKey }) {

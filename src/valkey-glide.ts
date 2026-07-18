@@ -36,6 +36,10 @@ export interface ValkeyGlideDialCacheClient extends DialCacheRedisClient {
   dispose(): void;
 }
 
+/**
+ * Wrap a caller-owned GLIDE connection. The returned adapter owns only its
+ * Script handles; callers dispose those after draining work, then close GLIDE.
+ */
 export function createValkeyGlideDialCacheClient(
   client: SupportedValkeyGlideClient,
 ): ValkeyGlideDialCacheClient {

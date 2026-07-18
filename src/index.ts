@@ -33,7 +33,6 @@ export type { RedisConfig } from "./internal/redis-cache.js";
 export type {
   DialCacheRedisClient,
   RedisCachePayload,
-  RedisClientFactory,
   RedisInvalidationRequest,
   RedisReadRequest,
   RedisWriteRequest,

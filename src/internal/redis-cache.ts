@@ -3,14 +3,17 @@ import { performance } from "node:perf_hooks";
 import { CacheLayer, DEFAULT_WATERMARK_TTL_SEC, type CacheConfigProvider, type CacheRampSampler, type DialCacheKeyConfig } from "../config.js";
 import { invalidationPrefix, redisClusterHashTag, type DialCacheKey } from "../key.js";
 import { labelsFor, type DialCacheMetricsAdapter, type MetricErrorKind } from "../metrics.js";
-import type { DialCacheRedisClient, RedisCachePayload, RedisClientFactory } from "../redis-client.js";
+import type { DialCacheRedisClient, RedisCachePayload } from "../redis-client.js";
 import { JsonSerializer, type Serializer } from "../serializer.js";
 import type { CacheGetResult } from "./cache-result.js";
 import { fetchKeyConfig, resolveLayerConfigResult, type ResolvedLayerConfig } from "./runtime-config.js";
 
 export interface RedisConfig {
-  readonly client?: DialCacheRedisClient;
-  readonly createClient?: RedisClientFactory;
+  /**
+   * Caller-created, connected, and lifecycle-owned semantic Redis client.
+   * DialCache borrows it and never drains, disposes, or closes it.
+   */
+  readonly client: DialCacheRedisClient;
   readonly serializer?: Serializer<unknown>;
   readonly watermarkTtlSec?: number;
 }
@@ -30,13 +33,17 @@ export class RedisCache {
   private readonly rampSampler: CacheRampSampler;
   private readonly defaultSerializer: Serializer<unknown>;
   private readonly watermarkTtlMs: number;
-  private readonly createClient: RedisClientFactory | null;
+  private readonly client: DialCacheRedisClient;
   private readonly metrics: DialCacheMetricsAdapter | null;
-  private clientPromise: Promise<DialCacheRedisClient> | null;
 
   constructor(options: RedisCacheOptions) {
     if (Object.hasOwn(options.redis, "keyPrefix")) {
       throw new TypeError("RedisConfig.keyPrefix was removed; use DialCacheConfig.namespace for cache identity");
+    }
+    if (Object.hasOwn(options.redis, "createClient")) {
+      throw new TypeError(
+        "RedisConfig.createClient was removed; create and connect a client, then pass it as RedisConfig.client",
+      );
     }
 
     this.configProvider = options.configProvider;
@@ -52,12 +59,11 @@ export class RedisCache {
     }
     this.metrics = options.metrics;
 
-    if (options.redis.client === undefined && options.redis.createClient === undefined) {
-      throw new Error("Redis config requires either client or createClient");
+    if (options.redis.client === undefined) {
+      throw new TypeError("Redis config requires client");
     }
 
-    this.createClient = options.redis.createClient ?? null;
-    this.clientPromise = options.redis.client === undefined ? null : Promise.resolve(options.redis.client);
+    this.client = options.redis.client;
   }
 
   async get<T>(key: DialCacheKey): Promise<T | undefined> {
@@ -77,9 +83,8 @@ export class RedisCache {
   async getWithResolvedConfig<T>(key: DialCacheKey, layerConfig: ResolvedLayerConfig): Promise<CacheGetResult<T>> {
     let payload: RedisCachePayload | null;
     try {
-      const client = await this.resolveClient();
       const redisKey = this.redisKey(key);
-      payload = await client.read({
+      payload = await this.client.read({
         valueKey: redisKey,
         ...(key.trackForInvalidation ? { watermarkKey: this.redisWatermarkKeyFromKey(key) } : {}),
       });
@@ -122,7 +127,6 @@ export class RedisCache {
     this.recordMetric((metrics) => metrics.observeSize(labelsFor(key, CacheLayer.REMOTE), payloadSize(serialized)));
 
     try {
-      const client = await this.resolveClient();
       const cacheTtlMs = ttlSec * 1000;
       if (!Number.isSafeInteger(cacheTtlMs)) {
         throw new RangeError("Redis cache TTL is too large");
@@ -133,12 +137,12 @@ export class RedisCache {
         value: serialized,
       } as const;
       return key.trackForInvalidation
-        ? await client.write({
+        ? await this.client.write({
             ...request,
             watermarkKey: this.redisWatermarkKeyFromKey(key),
             watermarkTtlFloorMs: this.watermarkTtlMs,
           })
-        : await client.write(request);
+        : await this.client.write(request);
     } catch (error) {
       this.recordError(key, "cache_write");
       throw error;
@@ -146,8 +150,7 @@ export class RedisCache {
   }
 
   async invalidate(keyType: string, id: string, futureBufferMs = 0, namespace = "urn"): Promise<void> {
-    const client = await this.resolveClient();
-    await client.invalidate({
+    await this.client.invalidate({
       watermarkKey: this.redisWatermarkKey(namespace, keyType, id),
       futureBufferMs,
       watermarkTtlFloorMs: this.watermarkTtlMs,
@@ -164,23 +167,6 @@ export class RedisCache {
 
   private redisWatermarkKeyFromKey(key: DialCacheKey): string {
     return this.redisWatermarkKey(key.namespace, key.keyType, key.id);
-  }
-
-  private async resolveClient(): Promise<DialCacheRedisClient> {
-    if (this.clientPromise === null) {
-      if (this.createClient === null) {
-        throw new Error("Redis client has not been configured");
-      }
-      this.clientPromise = Promise.resolve(this.createClient());
-    }
-    try {
-      return await this.clientPromise;
-    } catch (error) {
-      if (this.createClient !== null) {
-        this.clientPromise = null;
-      }
-      throw error;
-    }
   }
 
   private serializerFor(key: DialCacheKey): Serializer<unknown> {
