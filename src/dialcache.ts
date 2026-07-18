@@ -269,11 +269,17 @@ export class DialCache {
    * This does not synchronously evict local cache hits or untracked Redis values.
    * Call it only after the source mutation commits.
    *
-   * `futureBufferMs` is an application-owned safety window. Size it to cover
-   * source visibility lag plus the full remaining lifetime of fallback work
-   * that may already have observed stale data, including serializer dump,
-   * Redis client queue and network latency, script execution, the write itself,
-   * and a safety margin.
+   * `futureBufferMs` is an application-owned safety window. When using the
+   * bundled timestamp protocol, every Redis node eligible for primary promotion
+   * must have a synchronized system clock. Size the window to cover the maximum
+   * expected negative clock skew plus source visibility lag and the full
+   * remaining lifetime of fallback work that may already have observed stale
+   * data, including serializer dump, Redis client queue and network latency,
+   * script execution, the write itself, and a safety margin. DialCache does not
+   * detect or compensate for cross-node clock skew. Violating this assumption
+   * can suppress tracked cache fills or leave a pre-invalidation value readable
+   * until it expires or a later invalidation advances the watermark past its
+   * timestamp.
    * There is no universally safe library value. A zero buffer provides no
    * stale-publication protection once Redis time advances; an undersized buffer
    * may allow stale data to repopulate Redis. An oversized buffer temporarily
