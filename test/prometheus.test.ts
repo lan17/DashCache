@@ -27,7 +27,7 @@ const remoteOnly = () =>
 const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
 const GET_TIMER_HELP = "DialCache cache get latency in seconds.";
-const GET_TIMER_LABELS = ["use_case", "key_type", "layer"] as const;
+const GET_TIMER_LABELS = ["cache_namespace", "use_case", "key_type", "layer"] as const;
 const CONFIGURED_TIMER_BUCKETS = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10];
 const METRIC_ERROR_KINDS: Readonly<Record<MetricErrorKind, true>> = {
   key_construction: true,
@@ -117,6 +117,7 @@ describe("Prometheus metrics adapter", () => {
     const registry = new Registry();
     const metrics = new PrometheusDialCacheMetrics({ registry, prefix: "schema_" });
     const labels = {
+      cacheNamespace: "users",
       useCase: "PrometheusSchema",
       keyType: "user_id",
       layer: CacheLayer.LOCAL,
@@ -126,8 +127,13 @@ describe("Prometheus metrics adapter", () => {
     metrics.miss(labels);
     metrics.disabled({ ...labels, reason: "context" });
     metrics.error({ ...labels, error: "cache_read", inFallback: false });
-    metrics.invalidation({ keyType: labels.keyType, layer: labels.layer });
-    metrics.coalesced?.({ useCase: labels.useCase, keyType: labels.keyType, scope: "process" });
+    metrics.invalidation({ cacheNamespace: labels.cacheNamespace, keyType: labels.keyType, layer: labels.layer });
+    metrics.coalesced?.({
+      cacheNamespace: labels.cacheNamespace,
+      useCase: labels.useCase,
+      keyType: labels.keyType,
+      scope: "process",
+    });
     metrics.observeGet(labels, 0.05);
     metrics.observeFallback(labels, 0.05);
     metrics.observeSerialization({ ...labels, operation: "dump" }, 0.05);
@@ -137,26 +143,27 @@ describe("Prometheus metrics adapter", () => {
     // prom-client declares MetricType as a numeric enum, but this JSON API returns string type names.
     const families = (await registry.getMetricsAsJSON()) as unknown as MetricFamily[];
     expect(families.map(metricSchema).sort((left, right) => left.name.localeCompare(right.name))).toEqual([
-      counterSchema("schema_dialcache_coalesced_counter", ["use_case", "key_type", "scope"]),
-      counterSchema("schema_dialcache_disabled_counter", ["use_case", "key_type", "layer", "reason"]),
+      counterSchema("schema_dialcache_coalesced_counter", ["cache_namespace", "use_case", "key_type", "scope"]),
+      counterSchema("schema_dialcache_disabled_counter", ["cache_namespace", "use_case", "key_type", "layer", "reason"]),
       counterSchema("schema_dialcache_error_counter", [
+        "cache_namespace",
         "use_case",
         "key_type",
         "layer",
         "error",
         "in_fallback",
       ]),
-      histogramSchema("schema_dialcache_fallback_timer", ["use_case", "key_type", "layer"], TIMER_BUCKETS),
-      histogramSchema("schema_dialcache_get_timer", ["use_case", "key_type", "layer"], TIMER_BUCKETS),
-      counterSchema("schema_dialcache_invalidation_counter", ["key_type", "layer"]),
-      counterSchema("schema_dialcache_miss_counter", ["use_case", "key_type", "layer"]),
-      counterSchema("schema_dialcache_request_counter", ["use_case", "key_type", "layer"]),
+      histogramSchema("schema_dialcache_fallback_timer", ["cache_namespace", "use_case", "key_type", "layer"], TIMER_BUCKETS),
+      histogramSchema("schema_dialcache_get_timer", ["cache_namespace", "use_case", "key_type", "layer"], TIMER_BUCKETS),
+      counterSchema("schema_dialcache_invalidation_counter", ["cache_namespace", "key_type", "layer"]),
+      counterSchema("schema_dialcache_miss_counter", ["cache_namespace", "use_case", "key_type", "layer"]),
+      counterSchema("schema_dialcache_request_counter", ["cache_namespace", "use_case", "key_type", "layer"]),
       histogramSchema(
         "schema_dialcache_serialization_timer",
-        ["use_case", "key_type", "layer", "operation"],
+        ["cache_namespace", "use_case", "key_type", "layer", "operation"],
         TIMER_BUCKETS,
       ),
-      histogramSchema("schema_dialcache_size_histogram", ["use_case", "key_type", "layer"], SIZE_BUCKETS),
+      histogramSchema("schema_dialcache_size_histogram", ["cache_namespace", "use_case", "key_type", "layer"], SIZE_BUCKETS),
     ]);
 
     const serialization = families.find(({ name }) => name === "schema_dialcache_serialization_timer");
@@ -164,8 +171,20 @@ describe("Prometheus metrics adapter", () => {
       .filter(({ metricName }) => metricName === `${serialization.name}_sum`)
       .map(({ labels: sampleLabels }) => sampleLabels);
     expect(serializationLabels).toEqual([
-      { use_case: labels.useCase, key_type: labels.keyType, layer: labels.layer, operation: "dump" },
-      { use_case: labels.useCase, key_type: labels.keyType, layer: labels.layer, operation: "load" },
+      {
+        cache_namespace: labels.cacheNamespace,
+        use_case: labels.useCase,
+        key_type: labels.keyType,
+        layer: labels.layer,
+        operation: "dump",
+      },
+      {
+        cache_namespace: labels.cacheNamespace,
+        use_case: labels.useCase,
+        key_type: labels.keyType,
+        layer: labels.layer,
+        operation: "load",
+      },
     ]);
   });
 
@@ -173,6 +192,7 @@ describe("Prometheus metrics adapter", () => {
     const registry = new Registry();
     const metrics = new PrometheusDialCacheMetrics({ registry, prefix: "error_kind_" });
     const labels = {
+      cacheNamespace: "users",
       useCase: "PrometheusErrorKinds",
       keyType: "user_id",
       layer: CacheLayer.LOCAL,
@@ -186,6 +206,7 @@ describe("Prometheus metrics adapter", () => {
     for (const error of errorKinds) {
       await expect(
         sumMetric(registry, "error_kind_dialcache_error_counter", {
+          cache_namespace: labels.cacheNamespace,
           use_case: labels.useCase,
           key_type: labels.keyType,
           layer: labels.layer,
@@ -272,10 +293,11 @@ describe("Prometheus metrics adapter", () => {
     new Counter(config);
     const metrics = new PrometheusDialCacheMetrics({ registry, prefix });
 
-    metrics.request({ useCase: "UndefinedExemplarMode", keyType: "user_id", layer: CacheLayer.LOCAL });
+    metrics.request({ cacheNamespace: "urn", useCase: "UndefinedExemplarMode", keyType: "user_id", layer: CacheLayer.LOCAL });
 
     await expect(
       sumMetric(registry, metricName, {
+        cache_namespace: "urn",
         use_case: "UndefinedExemplarMode",
         key_type: "user_id",
         layer: "local",
@@ -287,7 +309,7 @@ describe("Prometheus metrics adapter", () => {
     const registry = new Registry();
     const redis = new FakeRedis();
     const metrics = createPrometheusDialCacheMetrics({ registry, prefix: "test_" });
-    const dialcache = new DialCache({ redis: { client: redis }, metrics });
+    const dialcache = new DialCache({ namespace: "metrics-cache", redis: { client: redis }, metrics });
     let calls = 0;
     const getUser = dialcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
@@ -301,21 +323,22 @@ describe("Prometheus metrics adapter", () => {
 
     expect(first).toEqual({ userId: "123", calls: 1 });
     expect(second).toEqual({ userId: "123", calls: 1 });
-    await expect(sumMetric(registry, "test_dialcache_request_counter", { use_case: "PrometheusMetricExport", layer: "remote" })).resolves.toBe(2);
-    await expect(sumMetric(registry, "test_dialcache_miss_counter", { use_case: "PrometheusMetricExport", layer: "remote" })).resolves.toBe(1);
-    await expect(sumMetric(registry, "test_dialcache_get_timer", { use_case: "PrometheusMetricExport", layer: "remote" })).resolves.toBeGreaterThan(0);
-    await expect(sumMetric(registry, "test_dialcache_fallback_timer", { use_case: "PrometheusMetricExport", layer: "remote" })).resolves.toBeGreaterThan(0);
+    const labels = { cache_namespace: "metrics-cache", use_case: "PrometheusMetricExport", layer: "remote" };
+    await expect(sumMetric(registry, "test_dialcache_request_counter", labels)).resolves.toBe(2);
+    await expect(sumMetric(registry, "test_dialcache_miss_counter", labels)).resolves.toBe(1);
+    await expect(sumMetric(registry, "test_dialcache_get_timer", labels)).resolves.toBeGreaterThan(0);
+    await expect(sumMetric(registry, "test_dialcache_fallback_timer", labels)).resolves.toBeGreaterThan(0);
     await expect(
-      sumMetric(registry, "test_dialcache_serialization_timer", { use_case: "PrometheusMetricExport", layer: "remote" }),
+      sumMetric(registry, "test_dialcache_serialization_timer", labels),
     ).resolves.toBeGreaterThan(0);
-    await expect(sumMetric(registry, "test_dialcache_size_histogram", { use_case: "PrometheusMetricExport", layer: "remote" })).resolves.toBeGreaterThan(0);
+    await expect(sumMetric(registry, "test_dialcache_size_histogram", labels)).resolves.toBeGreaterThan(0);
   });
 
   it("exports disabled, error, invalidation, and scoped coalescing counters", async () => {
     const registry = new Registry();
     const redis = new FakeRedis();
     const metrics = createPrometheusDialCacheMetrics({ registry, prefix: "test_" });
-    const dialcache = new DialCache({ redis: { client: redis }, metrics });
+    const dialcache = new DialCache({ namespace: "metrics-cache", redis: { client: redis }, metrics });
     const contextDisabled = dialcache.cached(async (userId: string) => userId, {
       keyType: "user_id",
       useCase: "PrometheusDisabledMetric",
@@ -377,10 +400,16 @@ describe("Prometheus metrics adapter", () => {
 
     expect(coalescedCalls).toBe(1);
     await expect(
-      sumMetric(registry, "test_dialcache_disabled_counter", { use_case: "PrometheusDisabledMetric", layer: "noop", reason: "context" }),
+      sumMetric(registry, "test_dialcache_disabled_counter", {
+        cache_namespace: "metrics-cache",
+        use_case: "PrometheusDisabledMetric",
+        layer: "noop",
+        reason: "context",
+      }),
     ).resolves.toBe(1);
     await expect(
       sumMetric(registry, "test_dialcache_error_counter", {
+        cache_namespace: "metrics-cache",
         use_case: "PrometheusErrorMetric",
         layer: "noop",
         error: "key_construction",
@@ -388,9 +417,16 @@ describe("Prometheus metrics adapter", () => {
       }),
     ).resolves.toBe(1);
     await expect(registry.metrics()).resolves.not.toMatch(/Tenant123KeyError|tenant-123|bad key/);
-    await expect(sumMetric(registry, "test_dialcache_invalidation_counter", { key_type: "user_id", layer: "remote" })).resolves.toBe(1);
+    await expect(
+      sumMetric(registry, "test_dialcache_invalidation_counter", {
+        cache_namespace: "metrics-cache",
+        key_type: "user_id",
+        layer: "remote",
+      }),
+    ).resolves.toBe(1);
     await expect(
       sumMetric(registry, "test_dialcache_coalesced_counter", {
+        cache_namespace: "metrics-cache",
         use_case: "PrometheusCoalescedMetric",
         key_type: "user_id",
         scope: "process",
@@ -398,6 +434,7 @@ describe("Prometheus metrics adapter", () => {
     ).resolves.toBe(1);
     await expect(
       sumMetric(registry, "test_dialcache_coalesced_counter", {
+        cache_namespace: "metrics-cache",
         use_case: "PrometheusRequestLocalCoalescedMetric",
         key_type: "user_id",
         scope: "request_local",

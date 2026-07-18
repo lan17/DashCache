@@ -7,6 +7,7 @@ import {
   DialCacheKeyConfig,
   DialCacheRedisPayloadEncodingError,
   type DialCacheRedisClient,
+  type RedisConfig,
   type Serializer,
 } from "../src/index.js";
 import { decodeFrame, encodeFrame, FakeRedis } from "./fake-redis.js";
@@ -125,7 +126,7 @@ describe("DialCache Redis TTL layer", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-05-12T17:00:00.000Z"));
     const redis = new FakeRedis();
-    const dialcache = new DialCache({ redis: { client: redis, keyPrefix: "dialcache:" } });
+    const dialcache = new DialCache({ redis: { client: redis } });
     let calls = 0;
     const getUser = dialcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
       keyType: "user_id",
@@ -136,7 +137,7 @@ describe("DialCache Redis TTL layer", () => {
 
     // When Redis misses and the fallback succeeds.
     const value = await dialcache.enable(async () => await getUser("123"));
-    const redisKey = `dialcache:${redisKeyFor("123", "RedisEnvelopeWrite")}`;
+    const redisKey = redisKeyFor("123", "RedisEnvelopeWrite");
     const frame = decodeFrame(redis.raw(redisKey));
 
     // Then DialCache stores the fallback result with a versioned timestamp and UTF-8 payload.
@@ -146,6 +147,14 @@ describe("DialCache Redis TTL layer", () => {
       encoding: 0,
       payload: JSON.stringify({ userId: "123", calls: 1 }),
     });
+  });
+
+  it.each(["dialcache:", undefined])("rejects the removed Redis keyPrefix option value %s for untyped callers", (keyPrefix) => {
+    const legacyRedisConfig = { client: new FakeRedis(), keyPrefix } as unknown as RedisConfig;
+
+    expect(() => new DialCache({ redis: legacyRedisConfig })).toThrow(
+      new TypeError("RedisConfig.keyPrefix was removed; use DialCacheConfig.namespace for cache identity"),
+    );
   });
 
   it("retries a lazy Redis client factory after a transient rejection", async () => {
@@ -492,6 +501,7 @@ describe("DialCache Redis TTL layer", () => {
     expect(second).toEqual({ userId: "123", calls: 2 });
     expect(redisClient.write).not.toHaveBeenCalled();
     expect(metrics.error).toHaveBeenCalledWith({
+      cacheNamespace: "urn",
       useCase: "RedisBadPayloadEncoding",
       keyType: "user_id",
       layer: CacheLayer.REMOTE,
@@ -538,6 +548,7 @@ describe("DialCache Redis TTL layer", () => {
     expect(calls).toBe(1);
     expect(redis.getCalls).toBe(1);
     expect(metrics.error).toHaveBeenCalledWith({
+      cacheNamespace: "urn",
       useCase: "RedisFakeBadPayloadEncoding",
       keyType: "user_id",
       layer: CacheLayer.REMOTE,

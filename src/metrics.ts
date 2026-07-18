@@ -22,6 +22,8 @@ export type MetricErrorKind =
   | "unknown";
 
 export interface CacheMetricLabels {
+  /** Logical DialCache namespace, independent of backend metric-name namespaces. */
+  readonly cacheNamespace: string;
   readonly useCase: string;
   readonly keyType: string;
   readonly layer: MetricLayer;
@@ -41,11 +43,13 @@ export interface SerializationMetricLabels extends CacheMetricLabels {
 }
 
 export interface InvalidationMetricLabels {
+  readonly cacheNamespace: string;
   readonly keyType: string;
   readonly layer: CacheLayer;
 }
 
 export interface CoalescedMetricLabels {
+  readonly cacheNamespace: string;
   readonly useCase: string;
   readonly keyType: string;
   readonly scope: CoalescingScope;
@@ -66,5 +70,5 @@ export interface DialCacheMetricsAdapter {
 }
 
 export function labelsFor(key: DialCacheKey, layer: MetricLayer): CacheMetricLabels {
-  return { useCase: key.useCase, keyType: key.keyType, layer };
+  return { cacheNamespace: key.namespace, useCase: key.useCase, keyType: key.keyType, layer };
 }

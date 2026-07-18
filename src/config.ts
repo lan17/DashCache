@@ -59,7 +59,11 @@ export type Logger = Pick<Console, "debug" | "error" | "warn">;
 
 export interface DialCacheConfig {
   readonly cacheConfigProvider?: CacheConfigProvider;
-  readonly urnPrefix?: string;
+  /**
+   * Logical namespace used in cache keys, invalidation identity, ramp sampling,
+   * and metrics. Defaults to "urn". May not contain `{` or `}`.
+   */
+  readonly namespace?: string;
   readonly logger?: Logger;
   /**
    * Maximum local entries across every use case in this DialCache instance.

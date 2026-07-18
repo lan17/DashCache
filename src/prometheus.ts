@@ -17,12 +17,12 @@ export interface PrometheusMetricsOptions {
 
 type PrometheusRegistry = Registry | Registry<OpenMetricsContentType>;
 
-type CounterLabels = "use_case" | "key_type" | "layer";
+type CounterLabels = "cache_namespace" | "use_case" | "key_type" | "layer";
 type DisabledLabels = CounterLabels | "reason";
 type ErrorLabels = CounterLabels | "error" | "in_fallback";
 type SerializationLabels = CounterLabels | "operation";
-type InvalidationLabels = "key_type" | "layer";
-type CoalescedLabels = "use_case" | "key_type" | "scope";
+type InvalidationLabels = "cache_namespace" | "key_type" | "layer";
+type CoalescedLabels = "cache_namespace" | "use_case" | "key_type" | "scope";
 
 interface BaseCollectorConfig<T extends string> {
   readonly name: string;
@@ -104,11 +104,16 @@ export class PrometheusDialCacheMetrics implements DialCacheMetricsAdapter {
   }
 
   invalidation(labels: InvalidationMetricLabels): void {
-    this.invalidationCounter.inc({ key_type: labels.keyType, layer: labels.layer });
+    this.invalidationCounter.inc({
+      cache_namespace: labels.cacheNamespace,
+      key_type: labels.keyType,
+      layer: labels.layer,
+    });
   }
 
   coalesced(labels: CoalescedMetricLabels): void {
     this.coalescedCounter.inc({
+      cache_namespace: labels.cacheNamespace,
       use_case: labels.useCase,
       key_type: labels.keyType,
       scope: labels.scope,
@@ -138,6 +143,7 @@ export function createPrometheusDialCacheMetrics(options: PrometheusMetricsOptio
 
 function cacheLabels(labels: CacheMetricLabels): Record<CounterLabels, string> {
   return {
+    cache_namespace: labels.cacheNamespace,
     use_case: labels.useCase,
     key_type: labels.keyType,
     layer: labels.layer,
@@ -150,64 +156,64 @@ function collectorConfigs(prefix: string) {
       type: "counter",
       name: `${prefix}dialcache_disabled_counter`,
       help: "Requests where DialCache skipped a cache layer.",
-      labelNames: ["use_case", "key_type", "layer", "reason"],
+      labelNames: ["cache_namespace", "use_case", "key_type", "layer", "reason"],
     },
     missCounter: {
       type: "counter",
       name: `${prefix}dialcache_miss_counter`,
       help: "DialCache cache misses.",
-      labelNames: ["use_case", "key_type", "layer"],
+      labelNames: ["cache_namespace", "use_case", "key_type", "layer"],
     },
     requestCounter: {
       type: "counter",
       name: `${prefix}dialcache_request_counter`,
       help: "Total DialCache cache-layer requests.",
-      labelNames: ["use_case", "key_type", "layer"],
+      labelNames: ["cache_namespace", "use_case", "key_type", "layer"],
     },
     errorCounter: {
       type: "counter",
       name: `${prefix}dialcache_error_counter`,
       help: "Errors during DialCache cache operations or fallback execution.",
-      labelNames: ["use_case", "key_type", "layer", "error", "in_fallback"],
+      labelNames: ["cache_namespace", "use_case", "key_type", "layer", "error", "in_fallback"],
     },
     invalidationCounter: {
       type: "counter",
       name: `${prefix}dialcache_invalidation_counter`,
       help: "DialCache invalidation calls by key type and layer.",
-      labelNames: ["key_type", "layer"],
+      labelNames: ["cache_namespace", "key_type", "layer"],
     },
     coalescedCounter: {
       type: "counter",
       name: `${prefix}dialcache_coalesced_counter`,
       help: "DialCache requests coalesced onto in-flight work by sharing scope.",
-      labelNames: ["use_case", "key_type", "scope"],
+      labelNames: ["cache_namespace", "use_case", "key_type", "scope"],
     },
     getTimer: {
       type: "histogram",
       name: `${prefix}dialcache_get_timer`,
       help: "DialCache cache get latency in seconds.",
-      labelNames: ["use_case", "key_type", "layer"],
+      labelNames: ["cache_namespace", "use_case", "key_type", "layer"],
       buckets: TIMER_BUCKETS,
     },
     fallbackTimer: {
       type: "histogram",
       name: `${prefix}dialcache_fallback_timer`,
       help: "Time spent in the underlying fallback function in seconds.",
-      labelNames: ["use_case", "key_type", "layer"],
+      labelNames: ["cache_namespace", "use_case", "key_type", "layer"],
       buckets: TIMER_BUCKETS,
     },
     serializationTimer: {
       type: "histogram",
       name: `${prefix}dialcache_serialization_timer`,
       help: "DialCache serialization latency in seconds.",
-      labelNames: ["use_case", "key_type", "layer", "operation"],
+      labelNames: ["cache_namespace", "use_case", "key_type", "layer", "operation"],
       buckets: TIMER_BUCKETS,
     },
     sizeHistogram: {
       type: "histogram",
       name: `${prefix}dialcache_size_histogram`,
       help: "Serialized DialCache value sizes in bytes.",
-      labelNames: ["use_case", "key_type", "layer"],
+      labelNames: ["cache_namespace", "use_case", "key_type", "layer"],
       buckets: SIZE_BUCKETS,
     },
   } as const;

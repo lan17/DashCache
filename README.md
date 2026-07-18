@@ -114,10 +114,8 @@ const redisClient = createClient({
 await redisClient.connect();
 
 const dialcache = new DialCache({
-  redis: {
-    client: createNodeRedisDialCacheClient(redisClient),
-    keyPrefix: "dialcache:",
-  },
+  namespace: "users-api",
+  redis: { client: createNodeRedisDialCacheClient(redisClient) },
 });
 ```
 
@@ -135,7 +133,8 @@ const glideClient = await GlideClient.createClient({
 });
 const redisClient = createValkeyGlideDialCacheClient(glideClient);
 const dialcache = new DialCache({
-  redis: { client: redisClient, keyPrefix: "dialcache:" },
+  namespace: "users-api",
+  redis: { client: redisClient },
 });
 
 function shutdown(): void {
@@ -167,6 +166,7 @@ You can also provide a lazy factory that returns a script-enabled client:
 
 ```ts
 const dialcache = new DialCache({
+  namespace: "users-api",
   redis: {
     createClient: async () => {
       const client = createClient({
@@ -235,7 +235,10 @@ Mutable Redis-backed use cases can opt into targeted invalidation by setting `tr
 import { CacheLayer, DialCache, DialCacheKeyConfig } from "dialcache";
 import { createNodeRedisDialCacheClient } from "dialcache/node-redis";
 
-const dialcache = new DialCache({ redis: { client: createNodeRedisDialCacheClient(redisClient) } });
+const dialcache = new DialCache({
+  namespace: "users-api",
+  redis: { client: createNodeRedisDialCacheClient(redisClient) },
+});
 
 // Chosen from this application's measured worst-case source and fallback timings.
 const USER_INVALIDATION_BUFFER_MS = 5_000;
@@ -259,7 +262,7 @@ await updateUser("123", patch);
 await dialcache.invalidateRemote("user_id", "123", USER_INVALIDATION_BUFFER_MS);
 ```
 
-Invalidation writes a Redis watermark at `{encodedUrnPrefix:encodedKeyType:encodedId}#watermark`. Tracked Redis cache entries use the same Redis Cluster hash tag, for example `{urn:user_id:123}?locale=en#GetMutableUser:dialcache-frame-v1`, so the value key and watermark key live in the same slot. Key components are percent-encoded before joining so delimiters inside IDs or args cannot collide with delimiters in the key format. Components may not contain `{` or `}` because those characters would corrupt the hash tag.
+Invalidation writes a Redis watermark at `{encodedNamespace:encodedKeyType:encodedId}#watermark`. Tracked Redis cache entries use the same Redis Cluster hash tag, for example `{users-api:user_id:123}?locale=en#GetMutableUser:dialcache-frame-v1`, so the value key and watermark key live in the same slot. Key components are percent-encoded before joining so delimiters inside IDs or args cannot collide with delimiters in the key format. Components may not contain `{` or `}` because those characters would corrupt the hash tag.
 
 The internal `:dialcache-frame-v1` suffix identifies values written with DialCache's binary protocol. Watermarks are stored as decimal timestamps.
 
@@ -366,11 +369,40 @@ const searchPosts = dialcache.cached(
 await dialcache.enable(() => searchPosts("u1", 2, "active"));
 ```
 
+`DialCacheConfig.namespace` is the logical cache namespace and the first component of every key. It defaults to `"urn"`, so omitting it preserves keys such as `urn:user_id:123#GetUser`. Set a stable application-specific value when multiple applications may use the same Redis deployment:
+
+```ts
+const dialcache = new DialCache({
+  namespace: "users-api",
+  redis: { client: redisClient },
+});
+```
+
+That produces Redis keys beginning with `users-api:...`, or `{users-api:...}` for invalidation-tracked values. `namespace` is DialCache's single cache-identity and key-partitioning setting: it participates in request-local, process-local, Redis, coalescing, deterministic ramp, invalidation, and metrics. It may not contain `{` or `}` because DialCache reserves those characters for Redis Cluster hash tags.
+
 - **`keyType` + `id` is the invalidation unit for tracked Redis entries.** `dialcache.invalidateRemote("user_id", "123", USER_INVALIDATION_BUFFER_MS)` writes one watermark for that user; any `trackForInvalidation` Redis entry with the same `keyType` and `id` is refreshed across all `args` variants when Redis is read. Existing request-local and process-local hits follow the limitation above, and untracked Redis entries do not consult the watermark. `useCase` identifies the individual cache (it's the metrics label and part of the stored key).
 - **`args` are part of the cache key** — different `args` produce different entries — but invalidation is by `id` only.
 - **Scalar key equality is string-based.** Runtime type is not an identity dimension: for matching surrounding dimensions, numeric `1`, string `"1"`, and bigint `1n` identify the same key; argument values `null` and `"null"` also match. `-0` matches `0`, and an `undefined` argument is omitted. If a deployment changes the logical meaning represented by a scalar, change an explicit identity dimension such as `keyType`, `useCase`, or an argument name/value.
 - **Non-key inputs** (for example a db handle) are simply parameters the `cacheKey` selector ignores. They still reach `fn` for non-coalesced executions, but concurrent same-key cache misses share the leader's execution, so do not ignore values like `AbortSignal`, auth context, locale, or other request-scoped inputs unless sharing one result is correct.
 - **Methods:** pass `obj.method.bind(obj)` (or `(...a) => obj.method(...a)`) — a bare `obj.method` reference loses `this`.
+
+### Migrating to `namespace`
+
+The public `urnPrefix` option and `DialCacheKey.urnPrefix` property were renamed to `namespace`. For callers that did not configure `redis.keyPrefix`, replacing the property name while keeping the same value preserves generated key bytes, invalidation watermarks, deterministic ramp cohorts, and cache behavior:
+
+```ts
+// Before
+new DialCache({ urnPrefix: "users-api", redis: { client: redisClient } });
+
+// After
+new DialCache({ namespace: "users-api", redis: { client: redisClient } });
+```
+
+Callers that omitted `urnPrefix` can continue omitting `namespace`; both defaults are `"urn"`. TypeScript rejects the removed property. The `DialCache` constructor throws `DialCacheConfig.urnPrefix was renamed to "namespace"`, and direct `DialCacheKey` construction throws `DialCacheKeyInit.urnPrefix was renamed to "namespace"`, when an untyped or JavaScript caller still supplies it. These errors prevent a custom legacy value from silently falling back to `urn`.
+
+`redis.keyPrefix` was removed so `namespace` is the only public cache-partitioning control. TypeScript rejects the removed Redis option, and untyped or JavaScript construction throws `RedisConfig.keyPrefix was removed; use DialCacheConfig.namespace for cache identity`. Move any required application or environment separation into a stable namespace such as `production-users-api`.
+
+Changing the namespace value intentionally creates a cold-cache boundary across every layer. Removing a previous Redis key prefix also changes the remote key bytes even if the namespace value stays the same. Old and new keyspaces do not share Redis values or invalidation watermarks. During an overlapping deployment, an invalidation handled by one version is invisible to the other, which can continue serving a stale tracked value until its value TTL expires. If remote invalidation correctness matters, a normal rolling deployment is unsafe: use a coordinated no-overlap cutover, or an operational bridge that prevents both versions from serving remote cache across mutations (for example, temporarily disable and clear remote caching during the transition). After the cutover, provision for fallback/refill load and allow old Redis keys to expire by TTL.
 
 ## Cached-value ownership
 
@@ -407,6 +439,7 @@ import { createPrometheusDialCacheMetrics } from "dialcache/prometheus";
 
 const registry = new Registry();
 const dialcache = new DialCache({
+  namespace: "users-api",
   metrics: createPrometheusDialCacheMetrics({
     registry,
     prefix: "myapp_", // myapp_dialcache_request_counter, etc.
@@ -424,18 +457,20 @@ The Prometheus adapter emits:
 
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
-| `dialcache_request_counter` | Counter | `use_case`, `key_type`, `layer` | Cache-layer requests that reached an enabled layer |
-| `dialcache_miss_counter` | Counter | `use_case`, `key_type`, `layer` | Cache misses |
-| `dialcache_disabled_counter` | Counter | `use_case`, `key_type`, `layer`, `reason` | Cache skips (`context`, `missing_config`, `invalid_ttl`, `ramped_down`, `config_error`) |
-| `dialcache_error_counter` | Counter | `use_case`, `key_type`, `layer`, `error`, `in_fallback` | Cache/fallback errors classified by a bounded failure site |
-| `dialcache_invalidation_counter` | Counter | `key_type`, `layer` | Invalidation calls for the layers touched today |
-| `dialcache_coalesced_counter` | Counter | `use_case`, `key_type`, `scope` | Coalesced requests split by `request_local` or `process` scope |
-| `dialcache_get_timer` | Histogram | `use_case`, `key_type`, `layer` | Cache get latency in seconds |
-| `dialcache_fallback_timer` | Histogram | `use_case`, `key_type`, `layer` | Time spent in the underlying function |
-| `dialcache_serialization_timer` | Histogram | `use_case`, `key_type`, `layer`, `operation` | Redis serializer dump/load latency |
-| `dialcache_size_histogram` | Histogram | `use_case`, `key_type`, `layer` | Serialized Redis payload size in bytes |
+| `dialcache_request_counter` | Counter | `cache_namespace`, `use_case`, `key_type`, `layer` | Cache-layer requests that reached an enabled layer |
+| `dialcache_miss_counter` | Counter | `cache_namespace`, `use_case`, `key_type`, `layer` | Cache misses |
+| `dialcache_disabled_counter` | Counter | `cache_namespace`, `use_case`, `key_type`, `layer`, `reason` | Cache skips (`context`, `missing_config`, `invalid_ttl`, `ramped_down`, `config_error`) |
+| `dialcache_error_counter` | Counter | `cache_namespace`, `use_case`, `key_type`, `layer`, `error`, `in_fallback` | Cache/fallback errors classified by a bounded failure site |
+| `dialcache_invalidation_counter` | Counter | `cache_namespace`, `key_type`, `layer` | Invalidation calls for the layers touched today |
+| `dialcache_coalesced_counter` | Counter | `cache_namespace`, `use_case`, `key_type`, `scope` | Coalesced requests split by `request_local` or `process` scope |
+| `dialcache_get_timer` | Histogram | `cache_namespace`, `use_case`, `key_type`, `layer` | Cache get latency in seconds |
+| `dialcache_fallback_timer` | Histogram | `cache_namespace`, `use_case`, `key_type`, `layer` | Time spent in the underlying function |
+| `dialcache_serialization_timer` | Histogram | `cache_namespace`, `use_case`, `key_type`, `layer`, `operation` | Redis serializer dump/load latency |
+| `dialcache_size_histogram` | Histogram | `cache_namespace`, `use_case`, `key_type`, `layer` | Serialized Redis payload size in bytes |
 
-The `layer` label is `request_local`, `local` (process-local), or `remote`. Disabled-context, key-construction, and config-provider failures use `noop` because no cache layer was reached. The bounded `scope` label on `dialcache_coalesced_counter` distinguishes request-local from instance-scoped single-flight work. `scope="process"` coordinates calls only within one `DialCache` instance; separate instances in the same process do not share in-flight state.
+Every metric carries `cache_namespace`, including disabled-context, key-construction, coalescing, and invalidation paths that do not have a constructed key. Its value is `DialCacheConfig.namespace`, defaulting to `urn`. The `layer` label is `request_local`, `local` (process-local), or `remote`. Disabled-context, key-construction, and config-provider failures use `noop` because no cache layer was reached. The bounded `scope` label on `dialcache_coalesced_counter` distinguishes request-local from instance-scoped single-flight work. `scope="process"` coordinates calls only within one `DialCache` instance; separate instances in the same process do not share in-flight state.
+
+Metric names are unchanged, but `cache_namespace` is a new required label/tag on every series. Update dashboards and alerts that enumerate exact label sets. A Prometheus registry containing collectors created by an older DialCache adapter has an incompatible schema; construct the upgraded adapter in a fresh registry/process, or use a new adapter prefix during an in-process migration.
 
 ### Datadog
 
@@ -457,10 +492,11 @@ const dogStatsD = new StatsD({
 });
 
 const dialcache = new DialCache({
+  namespace: "users-api", // cache identity and cache_namespace tag
   metrics: createDatadogDialCacheMetrics({
     client: dogStatsD,
     observationMetricType: "distribution",
-    namespace: "dialcache",
+    namespace: "dialcache", // metric-name prefix: dialcache.request.count, etc.
   }),
 });
 
@@ -472,22 +508,22 @@ dogStatsD.close();
 
 `observationMetricType` is required. `"distribution"` is recommended when latency and size percentiles must aggregate across hosts; enable the desired distribution percentiles and aggregations in Datadog. Choose `"histogram"` when host-level histogram aggregation matches your existing Datadog setup. The choice applies uniformly to all four duration/size metrics. Both modes produce Datadog custom metrics. Distribution volume scales with unique tag-value combinations: Datadog counts five baseline aggregations per combination, and enabling percentile aggregations adds five more. Review [Datadog's custom-metrics billing guidance](https://docs.datadoghq.com/account_management/billing/custom_metrics/) before rollout. Do not send both types under the same namespace: when changing types, use a new namespace during migration so one metric identity never mixes histogram and distribution points.
 
-The namespace defaults to `dialcache`. It must start with a letter and contain only letters, numbers, underscores, and dot-separated non-empty segments. The adapter rejects invalid namespaces and final metric names longer than 200 characters rather than relying on client-side normalization. A `hot-shots` `prefix` is applied after the adapter constructs the name, so include that prefix when checking the final length and avoid combining it with `namespace` accidentally. Client-level `globalTags` are appended by `hot-shots`; the table below lists the tags added by the adapter.
+`DatadogMetricsOptions.namespace` is the metric-name namespace and defaults to `dialcache`. It is separate from `DialCacheConfig.namespace`, the logical cache namespace emitted as the `cache_namespace` tag. The Datadog metric namespace must start with a letter and contain only letters, numbers, underscores, and dot-separated non-empty segments. The adapter rejects invalid metric namespaces and final metric names longer than 200 characters rather than relying on client-side normalization. A `hot-shots` `prefix` is applied after the adapter constructs the name, so include that prefix when checking the final length and avoid combining it with the metric namespace accidentally. Client-level `globalTags` are appended by `hot-shots`; the table below lists the tags added by the adapter.
 
 The Datadog adapter emits exact increments of `1` for counters and preserves seconds and bytes without unit conversion:
 
 | Metric | Type | Tags | Description |
 | --- | --- | --- | --- |
-| `dialcache.request.count` | Count | `use_case`, `key_type`, `layer` | Cache-layer requests that reached an enabled layer |
-| `dialcache.miss.count` | Count | `use_case`, `key_type`, `layer` | Cache misses |
-| `dialcache.disabled.count` | Count | `use_case`, `key_type`, `layer`, `reason` | Cache skips by bounded reason |
-| `dialcache.error.count` | Count | `use_case`, `key_type`, `layer`, `error`, `in_fallback` | Cache/fallback errors by bounded failure site |
-| `dialcache.invalidation.count` | Count | `key_type`, `layer` | Invalidation calls for the layers touched |
-| `dialcache.coalesced.count` | Count | `use_case`, `key_type`, `scope` | Coalesced requests by sharing scope |
-| `dialcache.get.duration` | Distribution or histogram | `use_case`, `key_type`, `layer` | Cache get latency in seconds |
-| `dialcache.fallback.duration` | Distribution or histogram | `use_case`, `key_type`, `layer` | Time spent in the underlying function in seconds |
-| `dialcache.serialization.duration` | Distribution or histogram | `use_case`, `key_type`, `layer`, `operation` | Redis serializer dump/load latency in seconds |
-| `dialcache.serialization.size` | Distribution or histogram | `use_case`, `key_type`, `layer` | Serialized Redis payload size in bytes |
+| `dialcache.request.count` | Count | `cache_namespace`, `use_case`, `key_type`, `layer` | Cache-layer requests that reached an enabled layer |
+| `dialcache.miss.count` | Count | `cache_namespace`, `use_case`, `key_type`, `layer` | Cache misses |
+| `dialcache.disabled.count` | Count | `cache_namespace`, `use_case`, `key_type`, `layer`, `reason` | Cache skips by bounded reason |
+| `dialcache.error.count` | Count | `cache_namespace`, `use_case`, `key_type`, `layer`, `error`, `in_fallback` | Cache/fallback errors by bounded failure site |
+| `dialcache.invalidation.count` | Count | `cache_namespace`, `key_type`, `layer` | Invalidation calls for the layers touched |
+| `dialcache.coalesced.count` | Count | `cache_namespace`, `use_case`, `key_type`, `scope` | Coalesced requests by sharing scope |
+| `dialcache.get.duration` | Distribution or histogram | `cache_namespace`, `use_case`, `key_type`, `layer` | Cache get latency in seconds |
+| `dialcache.fallback.duration` | Distribution or histogram | `cache_namespace`, `use_case`, `key_type`, `layer` | Time spent in the underlying function in seconds |
+| `dialcache.serialization.duration` | Distribution or histogram | `cache_namespace`, `use_case`, `key_type`, `layer`, `operation` | Redis serializer dump/load latency in seconds |
+| `dialcache.serialization.size` | Distribution or histogram | `cache_namespace`, `use_case`, `key_type`, `layer` | Serialized Redis payload size in bytes |
 
 Synchronous client throws are isolated by DialCache's fail-open metrics boundary. Buffered transport failures happen outside that synchronous call, so configure the DogStatsD client's error handling and shutdown behavior as part of application ownership.
 
@@ -513,7 +549,7 @@ Applications upgrading from exception-name labels must update alerts and dashboa
 
 ### Custom adapters
 
-For other telemetry backends, implement `DialCacheMetricsAdapter` and pass the adapter through `new DialCache({ metrics })`. Synchronous adapter failures are isolated from cache behavior and application fallbacks. Omit `metrics` to disable metrics.
+For other telemetry backends, implement `DialCacheMetricsAdapter` and pass the adapter through `new DialCache({ metrics })`. Every backend-neutral label object exposes the logical namespace as camel-case `cacheNamespace`; adapters should map it to their backend's `cache_namespace` label/tag. This field is present even when no key or cache layer was reached. Synchronous adapter failures are isolated from cache behavior and application fallbacks. Omit `metrics` to disable metrics.
 
 ### Migrating from implicit Prometheus metrics
 

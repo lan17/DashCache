@@ -56,6 +56,7 @@ class RecordingDogStatsDClient implements DatadogDogStatsDClient {
 }
 
 const cacheLabels = {
+  cacheNamespace: "users",
   useCase: "LoadUser",
   keyType: "user_id",
   layer: CacheLayer.LOCAL,
@@ -100,7 +101,7 @@ const metricLayers: readonly MetricLayer[] = [
 ];
 
 describe("Datadog metrics adapter", () => {
-  it("maps every DialCache metric to the default namespace with exact names, values, and tags", () => {
+  it("maps every DialCache metric to the default metric namespace with exact names, values, and tags", () => {
     const client = new RecordingDogStatsDClient();
     const metrics = new DatadogDialCacheMetrics({ client, observationMetricType: "distribution" });
 
@@ -108,14 +109,19 @@ describe("Datadog metrics adapter", () => {
     metrics.miss(cacheLabels);
     metrics.disabled({ ...cacheLabels, reason: "ramped_down" });
     metrics.error({ ...cacheLabels, error: "cache_read", inFallback: true });
-    metrics.invalidation({ keyType: "user_id", layer: CacheLayer.REMOTE });
-    metrics.coalesced({ useCase: "LoadUser", keyType: "user_id", scope: "process" });
+    metrics.invalidation({ cacheNamespace: cacheLabels.cacheNamespace, keyType: "user_id", layer: CacheLayer.REMOTE });
+    metrics.coalesced({
+      cacheNamespace: cacheLabels.cacheNamespace,
+      useCase: "LoadUser",
+      keyType: "user_id",
+      scope: "process",
+    });
     metrics.observeGet(cacheLabels, 0.125);
     metrics.observeFallback(cacheLabels, 0.5);
     metrics.observeSerialization({ ...cacheLabels, operation: "dump" }, 0.25);
     metrics.observeSize(cacheLabels, 4_096);
 
-    const baseTags = { use_case: "LoadUser", key_type: "user_id", layer: "local" };
+    const baseTags = { cache_namespace: "users", use_case: "LoadUser", key_type: "user_id", layer: "local" };
     expect(client.calls).toEqual([
       { method: "increment", name: "dialcache.request.count", value: 1, tags: baseTags },
       { method: "increment", name: "dialcache.miss.count", value: 1, tags: baseTags },
@@ -135,13 +141,13 @@ describe("Datadog metrics adapter", () => {
         method: "increment",
         name: "dialcache.invalidation.count",
         value: 1,
-        tags: { key_type: "user_id", layer: "remote" },
+        tags: { cache_namespace: "users", key_type: "user_id", layer: "remote" },
       },
       {
         method: "increment",
         name: "dialcache.coalesced.count",
         value: 1,
-        tags: { use_case: "LoadUser", key_type: "user_id", scope: "process" },
+        tags: { cache_namespace: "users", use_case: "LoadUser", key_type: "user_id", scope: "process" },
       },
       { method: "distribution", name: "dialcache.get.duration", value: 0.125, tags: baseTags },
       { method: "distribution", name: "dialcache.fallback.duration", value: 0.5, tags: baseTags },
@@ -198,7 +204,12 @@ describe("Datadog metrics adapter", () => {
       metrics.observeSerialization({ ...cacheLabels, operation }, 1);
     }
     for (const scope of ["request_local", "process"] as const) {
-      metrics.coalesced({ useCase: cacheLabels.useCase, keyType: cacheLabels.keyType, scope });
+      metrics.coalesced({
+        cacheNamespace: cacheLabels.cacheNamespace,
+        useCase: cacheLabels.useCase,
+        keyType: cacheLabels.keyType,
+        scope,
+      });
     }
 
     expect(client.calls.slice(0, metricLayers.length).map(({ tags }) => tags.layer)).toEqual(metricLayers);
@@ -236,8 +247,8 @@ describe("Datadog metrics adapter", () => {
     metrics.observeGet(cacheLabels, 0.25);
 
     expect(client.mockBuffer).toEqual([
-      "dialcache.request.count:1|c|#use_case:LoadUser,key_type:user_id,layer:local",
-      "dialcache.get.duration:0.25|d|#use_case:LoadUser,key_type:user_id,layer:local",
+      "dialcache.request.count:1|c|#cache_namespace:users,use_case:LoadUser,key_type:user_id,layer:local",
+      "dialcache.get.duration:0.25|d|#cache_namespace:users,use_case:LoadUser,key_type:user_id,layer:local",
     ]);
   });
 
@@ -248,7 +259,7 @@ describe("Datadog metrics adapter", () => {
     metrics.observeSize(cacheLabels, 256);
 
     expect(client.mockBuffer).toEqual([
-      "dialcache.serialization.size:256|h|#use_case:LoadUser,key_type:user_id,layer:local",
+      "dialcache.serialization.size:256|h|#cache_namespace:users,use_case:LoadUser,key_type:user_id,layer:local",
     ]);
   });
 
@@ -306,8 +317,9 @@ describe("Datadog metrics adapter", () => {
       invalidate: async () => undefined,
     };
     const dialcache = new DialCache({
+      namespace: "private-cache",
       metrics,
-      redis: { client: redis, keyPrefix: "private-cache-prefix:" },
+      redis: { client: redis },
       logger: { debug: vi.fn(), warn: vi.fn(), error: vi.fn() },
     });
     const load = dialcache.cached(async (id: string, filter: string) => ({ id, filter }), {
@@ -332,6 +344,7 @@ describe("Datadog metrics adapter", () => {
       name: "dialcache.error.count",
       value: 1,
       tags: {
+        cache_namespace: "private-cache",
         use_case: "DatadogBoundedTags",
         key_type: "user_id",
         layer: "remote",

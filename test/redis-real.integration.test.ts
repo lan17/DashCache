@@ -54,7 +54,7 @@ describe.each(engines)("DialCache Lua protocol on $name", ({ image }) => {
       throw new Error("Redis client did not start");
     }
     const scriptClient: DialCacheRedisClient = createNodeRedisDialCacheClient(client);
-    const dialcache = new DialCache({ redis: { client: scriptClient, keyPrefix: "real:" } });
+    const dialcache = new DialCache({ namespace: "real", redis: { client: scriptClient } });
     let jsonCalls = 0;
     let binaryCalls = 0;
     const getJson = dialcache.cached(async (id: string) => ({ id, calls: ++jsonCalls }), {
@@ -260,7 +260,7 @@ describe.each(engines)("DialCache Lua protocol on $name", ({ image }) => {
       throw new Error("Redis client did not start");
     }
     const scriptClient: DialCacheRedisClient = createNodeRedisDialCacheClient(client);
-    const dialcache = new DialCache({ redis: { client: scriptClient, keyPrefix: "tracked:" } });
+    const dialcache = new DialCache({ namespace: "tracked", redis: { client: scriptClient } });
     let version = 1;
     let calls = 0;
     const getUser = dialcache.cached(async (id: string) => ({ id, version, calls: ++calls }), {
@@ -292,7 +292,7 @@ describe.each(engines)("DialCache Lua protocol on $name", ({ image }) => {
     }
     const scriptClient = createNodeRedisDialCacheClient(client);
     const logger = { debug: () => undefined, warn: () => undefined, error: () => undefined };
-    const dialcache = new DialCache({ redis: { client: scriptClient, keyPrefix: "malformed:" }, logger });
+    const dialcache = new DialCache({ namespace: "malformed", redis: { client: scriptClient }, logger });
     let calls = 0;
     const getUser = dialcache.cached(async (id: string) => ({ id, calls: ++calls }), {
       keyType: "user_id",
@@ -301,7 +301,7 @@ describe.each(engines)("DialCache Lua protocol on $name", ({ image }) => {
       trackForInvalidation: true,
       defaultConfig: remoteOnly,
     });
-    await client.set("malformed:{urn:user_id:bad}#watermark", "0x10");
+    await client.set("{malformed:user_id:bad}#watermark", "0x10");
 
     const first = await dialcache.enable(async () => await getUser("bad"));
     const second = await dialcache.enable(async () => await getUser("bad"));
@@ -348,13 +348,13 @@ describe.each(engines)("DialCache Lua protocol on $name", ({ image }) => {
       observeSize: vi.fn(),
     };
     const logger = { debug: vi.fn(), warn: vi.fn(), error: vi.fn() };
-    const keyPrefix = "bad-encoding:";
-    const valueKey = `${keyPrefix}{urn:user_id:bad}#RealMalformedEncoding:dialcache-frame-v1`;
-    const watermarkKey = `${keyPrefix}{urn:user_id:bad}#watermark`;
+    const namespace = "bad-encoding";
+    const valueKey = `{${namespace}:user_id:bad}#RealMalformedEncoding:dialcache-frame-v1`;
+    const watermarkKey = `{${namespace}:user_id:bad}#watermark`;
     await client.set(valueKey, encodeFrame("malformed", 2), { PX: 60_000 });
     await client.set(watermarkKey, "0", { PX: 60_000 });
 
-    const dialcache = new DialCache({ redis: { client: redisClient, keyPrefix }, logger, metrics });
+    const dialcache = new DialCache({ namespace, redis: { client: redisClient }, logger, metrics });
     let calls = 0;
     const getUser = dialcache.cached(async (id: string) => ({ id, calls: ++calls }), {
       keyType: "user_id",
@@ -369,6 +369,7 @@ describe.each(engines)("DialCache Lua protocol on $name", ({ image }) => {
     expect(value).toEqual({ id: "bad", calls: 1 });
     expect(write).not.toHaveBeenCalled();
     expect(metrics.error).toHaveBeenCalledWith({
+      cacheNamespace: namespace,
       useCase: "RealMalformedEncoding",
       keyType: "user_id",
       layer: CacheLayer.REMOTE,

@@ -25,10 +25,11 @@ export interface DatadogDogStatsDClient {
 export interface DatadogMetricsOptions {
   readonly client: DatadogDogStatsDClient;
   readonly observationMetricType: DatadogObservationMetricType;
+  /** Datadog metric-name namespace; unrelated to DialCacheConfig.namespace. */
   readonly namespace?: string;
 }
 
-type CacheTag = "use_case" | "key_type" | "layer";
+type CacheTag = "cache_namespace" | "use_case" | "key_type" | "layer";
 type DatadogTags = Record<string, string>;
 type Observation = (name: string, value: number, tags: DatadogTags) => void;
 
@@ -95,6 +96,7 @@ export class DatadogDialCacheMetrics implements DialCacheMetricsAdapter {
 
   invalidation(labels: InvalidationMetricLabels): void {
     this.increment(this.metricNames.invalidation, {
+      cache_namespace: labels.cacheNamespace,
       key_type: labels.keyType,
       layer: labels.layer,
     });
@@ -102,6 +104,7 @@ export class DatadogDialCacheMetrics implements DialCacheMetricsAdapter {
 
   coalesced(labels: CoalescedMetricLabels): void {
     this.increment(this.metricNames.coalesced, {
+      cache_namespace: labels.cacheNamespace,
       use_case: labels.useCase,
       key_type: labels.keyType,
       scope: labels.scope,
@@ -138,6 +141,7 @@ export function createDatadogDialCacheMetrics(options: DatadogMetricsOptions): D
 
 function cacheTags(labels: CacheMetricLabels): Record<CacheTag, string> {
   return {
+    cache_namespace: labels.cacheNamespace,
     use_case: labels.useCase,
     key_type: labels.keyType,
     layer: labels.layer,

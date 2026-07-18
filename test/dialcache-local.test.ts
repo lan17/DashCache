@@ -10,6 +10,7 @@ import {
   JsonSerializer,
   UseCaseIsAlreadyRegisteredError,
   UseCaseNameIsReservedError,
+  type DialCacheConfig,
 } from "../src/index.js";
 
 interface Deferred<T> {
@@ -776,6 +777,23 @@ describe("DialCache local-only MVP", () => {
     },
   );
 
+  it("rejects the renamed urnPrefix option for untyped callers", () => {
+    const legacyConfig = { urnPrefix: "users-api" } as unknown as DialCacheConfig;
+
+    expect(() => new DialCache(legacyConfig)).toThrow(
+      new TypeError('DialCacheConfig.urnPrefix was renamed to "namespace"'),
+    );
+  });
+
+  it.each(["bad{namespace", "bad}namespace"])("rejects namespace hash-tag braces in %s", (namespace) => {
+    const error = new TypeError('DialCache namespace must not contain "{" or "}"');
+
+    expect(() => new DialCache({ namespace })).toThrow(error);
+    expect(
+      () => new DialCacheKey({ namespace, keyType: "user_id", id: "123", useCase: "InvalidNamespace" }),
+    ).toThrow(error);
+  });
+
   it("round-trips values through the JSON serializer", async () => {
     // Given the default JSON serializer.
     const serializer = new JsonSerializer<{ id: string; enabled: boolean }>();
@@ -847,11 +865,25 @@ describe("DialCache local-only MVP", () => {
 
     // Then it keeps the structured key format used for debugging and grouping.
     expect(rendered).toBe("urn:user_id:123?filter=active&page=2#GetPosts");
+    expect(key.namespace).toBe("urn");
+  });
+
+  it("rejects the renamed DialCacheKey urnPrefix option for untyped callers", () => {
+    const legacyInit = {
+      keyType: "user_id",
+      id: "123",
+      useCase: "GetPosts",
+      urnPrefix: "users-api",
+    } as unknown as ConstructorParameters<typeof DialCacheKey>[0];
+
+    expect(() => new DialCacheKey(legacyInit)).toThrow(
+      new TypeError('DialCacheKeyInit.urnPrefix was renamed to "namespace"'),
+    );
   });
 
   it("keeps delimiter-containing URN components and args distinct", () => {
     // Given keys whose raw components would collide without escaping delimiter characters.
-    const prefixWithDelimiter = new DialCacheKey({ keyType: "user_id", id: "123", useCase: "GetPosts", urnPrefix: "urn:dialcache" });
+    const namespaceWithDelimiter = new DialCacheKey({ keyType: "user_id", id: "123", useCase: "GetPosts", namespace: "urn:dialcache" });
     const argValueWithDelimiter = new DialCacheKey({
       keyType: "user_id",
       id: "123",
@@ -872,7 +904,8 @@ describe("DialCache local-only MVP", () => {
 
     // When the keys are rendered.
     // Then delimiter-bearing components are encoded, while simple components remain readable.
-    expect(prefixWithDelimiter.toString()).toBe("urn%3Adialcache:user_id:123#GetPosts");
+    expect(namespaceWithDelimiter.toString()).toBe("urn%3Adialcache:user_id:123#GetPosts");
+    expect(namespaceWithDelimiter.namespace).toBe("urn:dialcache");
     expect(argValueWithDelimiter.toString()).not.toBe(splitArgs.toString());
     expect(argValueWithDelimiter.toString()).toContain("filter=active%26page%3D2");
     expect(argValueWithFragment.toString()).not.toBe(useCaseWithFragment.toString());

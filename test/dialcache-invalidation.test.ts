@@ -332,7 +332,14 @@ describe("DialCache targeted invalidation watermarks", () => {
     expect(redis.values.size).toBe(0);
     expect(metrics.events).toContainEqual({
       name: "error",
-      labels: { useCase: "WatermarkReadFailOpen", keyType: "user_id", layer: CacheLayer.REMOTE, error: "cache_read", inFallback: false },
+      labels: {
+        cacheNamespace: "urn",
+        useCase: "WatermarkReadFailOpen",
+        keyType: "user_id",
+        layer: CacheLayer.REMOTE,
+        error: "cache_read",
+        inFallback: false,
+      },
     });
   });
 
@@ -348,11 +355,18 @@ describe("DialCache targeted invalidation watermarks", () => {
     expect(logger.warn).toHaveBeenCalledWith("Error writing DialCache invalidation watermark", expect.any(Error));
     expect(metrics.events).toContainEqual({
       name: "invalidation",
-      labels: { keyType: "user_id", layer: CacheLayer.REMOTE },
+      labels: { cacheNamespace: "urn", keyType: "user_id", layer: CacheLayer.REMOTE },
     });
     expect(metrics.events).toContainEqual({
       name: "error",
-      labels: { useCase: "watermark", keyType: "user_id", layer: CacheLayer.REMOTE, error: "invalidation", inFallback: false },
+      labels: {
+        cacheNamespace: "urn",
+        useCase: "watermark",
+        keyType: "user_id",
+        layer: CacheLayer.REMOTE,
+        error: "invalidation",
+        inFallback: false,
+      },
     });
   });
 
@@ -370,8 +384,8 @@ describe("DialCache targeted invalidation watermarks", () => {
   it("constructs cluster-compatible tracked value and watermark keys", async () => {
     const redis = new FakeRedis();
     const dialcache = new DialCache({
-      urnPrefix: "urn:galileo:test",
-      redis: { client: redis, keyPrefix: "dialcache:" },
+      namespace: "urn:galileo:test",
+      redis: { client: redis },
     });
     const getUser = dialcache.cached(async (userId: string, locale: string) => ({ userId, locale }), {
       keyType: "User",
@@ -385,8 +399,8 @@ describe("DialCache targeted invalidation watermarks", () => {
     await dialcache.invalidateRemote("User", "123");
 
     expect([...redis.values.keys()].sort()).toEqual([
-      "dialcache:{urn%3Agalileo%3Atest:User:123}#watermark",
-      "dialcache:{urn%3Agalileo%3Atest:User:123}?locale=en#ClusterSlotUser:dialcache-frame-v1",
+      "{urn%3Agalileo%3Atest:User:123}#watermark",
+      "{urn%3Agalileo%3Atest:User:123}?locale=en#ClusterSlotUser:dialcache-frame-v1",
     ]);
     expect(redisClusterHashTag(invalidationPrefix("urn", "user_id", "123"))).toBe("{urn:user_id:123}");
     expect(() => new DialCacheKey({ keyType: "user_id", id: "{123}", useCase: "BadTrackedKey", trackForInvalidation: true })).toThrow(

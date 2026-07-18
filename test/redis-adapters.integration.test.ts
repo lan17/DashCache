@@ -145,7 +145,7 @@ describe("DialCache Redis adapter conformance on Redis 6.2", () => {
     });
 
     it("backs a complete DialCache serializer round trip", async () => {
-      const dialcache = new DialCache({ redis: { client: adapter(), keyPrefix: `${kind}:cache:` } });
+      const dialcache = new DialCache({ namespace: `${kind}-cache`, redis: { client: adapter() } });
       let calls = 0;
       const serializer: Serializer<string> = {
         dump: async (value) => Buffer.from(value, "utf8"),

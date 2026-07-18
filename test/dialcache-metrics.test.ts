@@ -79,6 +79,75 @@ const remoteOnly = () =>
 const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("DialCache observability metrics", () => {
+  it("includes the configured cache namespace on every metric path", async () => {
+    const metrics = new RecordingMetrics();
+    const redis = new FakeRedis();
+    let releaseFallback: () => void = () => undefined;
+    const fallbackGate = new Promise<void>((resolve) => {
+      releaseFallback = resolve;
+    });
+    const dialcache = new DialCache({
+      namespace: "users-cache",
+      metrics,
+      redis: { client: redis },
+      logger: { debug: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    });
+    const getUser = dialcache.cached(async (userId: string) => {
+      if (userId === "123") {
+        await fallbackGate;
+      }
+      return { userId };
+    }, {
+      keyType: "user_id",
+      useCase: "NamespaceMetrics",
+      cacheKey: (userId) => userId,
+      trackForInvalidation: true,
+      defaultConfig: remoteOnly(),
+    });
+    const badKey = dialcache.cached(async (userId: string) => userId, {
+      keyType: "user_id",
+      useCase: "NamespaceNoKeyMetrics",
+      cacheKey: () => {
+        throw new Error("bad key");
+      },
+      defaultConfig: localOnly(),
+    });
+
+    await getUser("disabled");
+    const pending = dialcache.enable(async () => await Promise.all([getUser("123"), getUser("123")]));
+    await tick();
+    releaseFallback();
+    await pending;
+    await dialcache.enable(async () => await badKey("123"));
+    await dialcache.invalidateRemote("user_id", "123");
+
+    expect(new Set(metrics.events.map(({ name }) => name))).toEqual(
+      new Set([
+        "request",
+        "miss",
+        "disabled",
+        "error",
+        "invalidation",
+        "coalesced",
+        "get",
+        "fallback",
+        "serialization",
+        "size",
+      ]),
+    );
+    expect(metrics.events.every(({ labels }) => labels.cacheNamespace === "users-cache")).toBe(true);
+    expect(events(metrics, "disabled", { useCase: "NamespaceMetrics", layer: "noop", reason: "context" })).toHaveLength(1);
+    expect(
+      events(metrics, "error", {
+        useCase: "NamespaceNoKeyMetrics",
+        layer: "noop",
+        error: "key_construction",
+        inFallback: false,
+      }),
+    ).toHaveLength(1);
+    expect(events(metrics, "invalidation", { keyType: "user_id", layer: CacheLayer.REMOTE })).toHaveLength(1);
+  });
+
   it("supports an injected metrics adapter without requiring Prometheus", async () => {
     // Given a custom in-memory metrics adapter.
     const metrics = new RecordingMetrics();

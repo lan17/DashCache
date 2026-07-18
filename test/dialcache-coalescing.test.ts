@@ -79,7 +79,12 @@ describe("DialCache request coalescing", () => {
       { id: "1", calls: 1 },
     ]);
     expect(coalesced).toHaveBeenCalledTimes(2);
-    expect(coalesced).toHaveBeenCalledWith({ useCase: "CoalesceLocalMiss", keyType: "user_id", scope: "process" });
+    expect(coalesced).toHaveBeenCalledWith({
+      cacheNamespace: "urn",
+      useCase: "CoalesceLocalMiss",
+      keyType: "user_id",
+      scope: "process",
+    });
   });
 
   it("coalesces request-local-only work within one request and shares the resolved reference", async () => {
@@ -108,6 +113,7 @@ describe("DialCache request coalescing", () => {
     expect(results[2]).toBe(results[0]);
     expect(coalesced).toHaveBeenCalledTimes(2);
     expect(coalesced).toHaveBeenCalledWith({
+      cacheNamespace: "urn",
       useCase: "CoalesceRequestLocal",
       keyType: "user_id",
       scope: "request_local",
@@ -225,12 +231,14 @@ describe("DialCache request coalescing", () => {
     expect(results[1]).toBe(results[0]);
     expect(coalesced).toHaveBeenCalledTimes(1);
     expect(coalesced).toHaveBeenCalledWith({
+      cacheNamespace: "urn",
       useCase: "RequestThenProcessCoalescing",
       keyType: "user_id",
       scope: "process",
     });
     expect(request).toHaveBeenCalledTimes(3);
     expect(request).toHaveBeenCalledWith({
+      cacheNamespace: "urn",
       useCase: "RequestThenProcessCoalescing",
       keyType: "user_id",
       layer: "request_local",
@@ -238,6 +246,7 @@ describe("DialCache request coalescing", () => {
     expect(request.mock.calls.filter(([labels]) => labels.layer === "request_local")).toHaveLength(2);
     expect(miss).toHaveBeenCalledTimes(3);
     expect(miss).toHaveBeenCalledWith({
+      cacheNamespace: "urn",
       useCase: "RequestThenProcessCoalescing",
       keyType: "user_id",
       layer: "request_local",
