@@ -117,9 +117,14 @@ const dialcache = new DialCache({
   namespace: "users-api",
   redis: { client: createNodeRedisDialCacheClient(redisClient) },
 });
+
+async function shutdown(): Promise<void> {
+  // Stop new work and await every outstanding cached call and invalidation first.
+  await redisClient.quit();
+}
 ```
 
-The `redis.client` and `redis.createClient` options accept the semantic `DialCacheRedisClient` interface. Node-redis users should register the supplied scripts and wrap their client with `createNodeRedisDialCacheClient` as shown above.
+`redis.client` is required when Redis is configured and accepts the semantic `DialCacheRedisClient` interface. Create and connect the underlying client before constructing `DialCache`. Node-redis users should register the supplied scripts and wrap their client with `createNodeRedisDialCacheClient` as shown above.
 
 Valkey GLIDE users pass an already-created standalone or cluster client to the GLIDE adapter:
 
@@ -138,13 +143,17 @@ const dialcache = new DialCache({
 });
 
 function shutdown(): void {
-  // Release adapter-owned scripts before closing GLIDE.
+  // After draining cached calls and invalidations, release scripts before closing GLIDE.
   redisClient.dispose();
   glideClient.close();
 }
 ```
 
-DialCache does not create, connect, or close the underlying Redis client. After outstanding cache operations finish, the GLIDE adapter's `dispose()` method releases its five native `Script` handles; it is idempotent and does not close the wrapped GLIDE connection.
+The application owns the complete Redis lifecycle. It creates and connects the underlying client and passes the semantic adapter to DialCache. During shutdown, stop starting DialCache-backed work and await every outstanding cached-function and `invalidateRemote()` promise, including calls still running fallbacks that may later write Redis. Then dispose adapter-owned resources and close the underlying connection. DialCache only borrows `redis.client`; it has no close or drain method and never disposes or closes caller resources.
+
+The node-redis adapter owns no additional resources, so the application closes the underlying node-redis client after draining work. The GLIDE adapter owns five native `Script` handles but not the wrapped connection. After outstanding operations finish, call its idempotent `dispose()` before closing GLIDE as shown above; disposal while an adapter operation is in flight throws rather than releasing a live script.
+
+`redis.createClient` and the `RedisClientFactory` type were removed. Move lazy factory work to application startup, retain the underlying client and adapter handles, and pass the resulting adapter as `redis.client`. Because `redis.client` was already supported and this change does not alter Redis keys or the wire protocol, migrated application construction works with both older and newer DialCache versions during rollout or rollback.
 
 When caching is enabled, reads flow through:
 
@@ -161,24 +170,6 @@ request-local cache -> process-local cache -> Redis cache -> fallback function
 - Missing process-local/Redis TTL or ramp config disables that layer, records a disabled reason, and falls through to the next layer/fallback.
 
 Node-redis computes each script's SHA, uses `EVALSHA`, and retries with `EVAL` after `NOSCRIPT`. Its cluster client routes scripts by their first key and performs that fallback on the selected shard. The GLIDE adapter uses GLIDE's native `Script` lifecycle and byte decoder; GLIDE routes scripts from their declared keys. Tracked reads are deliberately routed to primaries so a lagging replica cannot hide an invalidation watermark.
-
-You can also provide a lazy factory that returns a script-enabled client:
-
-```ts
-const dialcache = new DialCache({
-  namespace: "users-api",
-  redis: {
-    createClient: async () => {
-      const client = createClient({
-        url: process.env.REDIS_URL,
-        scripts: dialcacheRedisScripts,
-      });
-      await client.connect();
-      return createNodeRedisDialCacheClient(client);
-    },
-  },
-});
-```
 
 ### Serialization
 
@@ -570,7 +561,6 @@ Included:
 - Process-local TTL/LRU cache with a global entry-count bound
 - Redis TTL cache
 - Request-local → process-local → Redis → fallback read-through chain
-- Lazy Redis client factory support
 - Lua-backed Redis reads and writes with Redis-generated timestamps
 - Versioned binary Redis frames for UTF-8 and Buffer serializer output
 - Native node-redis script registration with automatic `NOSCRIPT` recovery

@@ -157,72 +157,18 @@ describe("DialCache Redis TTL layer", () => {
     );
   });
 
-  it("retries a lazy Redis client factory after a transient rejection", async () => {
-    // Given the first lazy Redis connection attempt fails but a later attempt can succeed.
-    const redis = new FakeRedis();
-    let factoryCalls = 0;
-    const logger = { debug: vi.fn(), warn: vi.fn(), error: vi.fn() };
-    const dialcache = new DialCache({
-      redis: {
-        createClient: async () => {
-          factoryCalls += 1;
-          if (factoryCalls === 1) {
-            throw new Error("redis boot failed");
-          }
-          return redis;
-        },
-      },
-      logger,
-    });
-    let calls = 0;
-    const getUser = dialcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
-      keyType: "user_id",
-      useCase: "RedisClientFactoryRetry",
-      cacheKey: (userId) => userId,
-      defaultConfig: DialCacheKeyConfig.enabled(60),
-    });
+  it.each([() => new FakeRedis(), undefined])(
+    "rejects the removed Redis createClient option value %s for untyped callers",
+    (createClient) => {
+      const legacyRedisConfig = { client: new FakeRedis(), createClient } as unknown as RedisConfig;
 
-    // When the first call fails open and the second call retries Redis.
-    const first = await dialcache.enable(async () => await getUser("123"));
-    const second = await dialcache.enable(async () => await getUser("123"));
-
-    // Then the rejected client promise does not poison the DialCache instance forever.
-    expect(first).toEqual({ userId: "123", calls: 1 });
-    expect(second).toEqual({ userId: "123", calls: 1 });
-    expect(factoryCalls).toBe(2);
-    expect(redis.setCalls).toBe(1);
-  });
-
-  it("uses a lazy Redis client factory once", async () => {
-    // Given Redis is configured with a client factory instead of an eager client.
-    const redis = new FakeRedis();
-    let factoryCalls = 0;
-    const dialcache = new DialCache({
-      redis: {
-        createClient: async () => {
-          factoryCalls += 1;
-          return redis;
-        },
-      },
-    });
-    let calls = 0;
-    const getUser = dialcache.cached(async (userId: string) => ({ userId, calls: ++calls }), {
-      keyType: "user_id",
-      useCase: "RedisClientFactory",
-      cacheKey: (userId) => userId,
-      defaultConfig: DialCacheKeyConfig.enabled(60),
-    });
-
-    // When multiple cache operations need Redis.
-    await dialcache.enable(async () => {
-      await getUser("123");
-      await getUser("456");
-    });
-
-    // Then the factory is lazy and reused for subsequent Redis commands.
-    expect(factoryCalls).toBe(1);
-    expect(redis.setCalls).toBe(2);
-  });
+      expect(() => new DialCache({ redis: legacyRedisConfig })).toThrow(
+        new TypeError(
+          "RedisConfig.createClient was removed; create and connect a client, then pass it as RedisConfig.client",
+        ),
+      );
+    },
+  );
 
   it("fails open when Redis operations fail before fallback", async () => {
     // Given Redis is unavailable and local caching is not configured for this key.
@@ -587,12 +533,12 @@ describe("DialCache Redis TTL layer", () => {
     expect(logger.warn).not.toHaveBeenCalled();
   });
 
-  it("rejects Redis config without a client or client factory", () => {
-    // Given a Redis config that cannot create commands.
-    const construct = () => new DialCache({ redis: {} });
+  it("rejects Redis config without a client", () => {
+    // Given an untyped Redis config without the required caller-owned client.
+    const construct = () => new DialCache({ redis: {} as RedisConfig });
 
     // When the cache is constructed, then the invalid Redis configuration is rejected.
-    expect(construct).toThrow("Redis config requires either client or createClient");
+    expect(construct).toThrow(new TypeError("Redis config requires client"));
   });
 
 });

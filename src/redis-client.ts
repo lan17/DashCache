@@ -72,6 +72,10 @@ export interface RedisInvalidationRequest {
   readonly watermarkTtlFloorMs: number;
 }
 
+/**
+ * Caller-owned semantic Redis boundary. DialCache borrows this client and does
+ * not create, connect, drain, dispose, or close it.
+ */
 export interface DialCacheRedisClient {
   /** Atomically read and validate a value against its watermark when tracked. */
   read(request: RedisReadRequest): Awaitable<RedisCachePayload | null>;
@@ -80,5 +84,3 @@ export interface DialCacheRedisClient {
   /** Advance the watermark monotonically after the source mutation commits. */
   invalidate(request: RedisInvalidationRequest): Awaitable<void>;
 }
-
-export type RedisClientFactory = () => Awaitable<DialCacheRedisClient>;
