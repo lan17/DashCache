@@ -256,7 +256,18 @@ export class DialCache {
    *
    * This does not synchronously evict local cache hits or untracked Redis values.
    *
-   * @param futureBufferMs Nonnegative safe integer covering source lag and stale fallback work through the Redis write.
+   * `futureBufferMs` is an application-owned safety window. Size it to cover
+   * source visibility lag plus the full remaining lifetime of fallback work
+   * that may already have observed stale data, including serializer dump,
+   * Redis client queue and network latency, script execution, the write itself,
+   * and a safety margin.
+   * There is no universally safe library value. A zero buffer provides no
+   * stale-publication protection once Redis time advances; an undersized buffer
+   * may allow stale data to repopulate Redis. An oversized buffer temporarily
+   * converts more tracked reads into misses and suppresses their cache writes,
+   * but does not delay or suppress returning fallback values to callers.
+   *
+   * @param futureBufferMs Nonnegative safe integer; defaults to zero for backward compatibility.
    */
   async invalidateRemote(keyType: string, id: Id, futureBufferMs = 0): Promise<void> {
     assertValidFutureBufferMs(futureBufferMs);
