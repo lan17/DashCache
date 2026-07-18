@@ -13,6 +13,7 @@ const rootConsumer = `import {
   DialCache,
   DialCacheKey,
   DialCacheKeyConfig,
+  DialCacheRedisProtocolError,
   JsonSerializer,
   type CacheMetricLabels,
   type CacheConfigProvider,
@@ -69,6 +70,7 @@ const datadogClassAdapter = new DatadogDialCacheMetrics(datadogOptions);
 // @ts-expect-error The observation type is an explicit, required choice.
 const missingObservationType: DatadogMetricsOptions = { client: dogStatsDClient };
 const cache = new DialCache({ namespace: "consumer-cache", metrics });
+const redisProtocolError = new DialCacheRedisProtocolError("Invalid DialCache Redis write reply");
 const load = cache.cached(async (id: string) => id, {
   keyType: "id",
   useCase: "Load",
@@ -228,6 +230,7 @@ void invalidationMetricLabels;
 void keyInitHasNoUrnPrefix;
 void legacyKeyInit;
 void namespacedKey.namespace;
+void redisProtocolError.name;
 void requestLocalCoalescingScope;
 void boundedErrorKind;
 void metricErrorKinds;
@@ -360,13 +363,38 @@ try {
     [
       "--input-type=module",
       "--eval",
-      "await import('dialcache'); await import('dialcache/datadog'); await import('dialcache/redis-protocol'); await import('dialcache/node-redis')",
+      `const root = await import("dialcache");
+const nodeRedis = await import("dialcache/node-redis");
+await import("dialcache/datadog");
+await import("dialcache/redis-protocol");
+try {
+  nodeRedis.dialcacheRedisScripts.dialcacheWrite.transformReply(2);
+  throw new Error("Expected an invalid node-redis script reply to fail");
+} catch (error) {
+  if (!(error instanceof root.DialCacheRedisProtocolError)) {
+    throw new Error("The node-redis protocol error does not match the root ESM export");
+  }
+}`,
     ],
     { cwd: workspace },
   );
   await exec(
     process.execPath,
-    ["--eval", "require('dialcache'); require('dialcache/datadog'); require('dialcache/redis-protocol'); require('dialcache/node-redis')"],
+    [
+      "--eval",
+      `const root = require("dialcache");
+const nodeRedis = require("dialcache/node-redis");
+require("dialcache/datadog");
+require("dialcache/redis-protocol");
+try {
+  nodeRedis.dialcacheRedisScripts.dialcacheWrite.transformReply(2);
+  throw new Error("Expected an invalid node-redis script reply to fail");
+} catch (error) {
+  if (!(error instanceof root.DialCacheRedisProtocolError)) {
+    throw new Error("The node-redis protocol error does not match the root CommonJS export");
+  }
+}`,
+    ],
     { cwd: workspace },
   );
   await exec(
@@ -403,7 +431,23 @@ try {
     [
       "--input-type=module",
       "--eval",
-      "await import('dialcache'); await import('dialcache/datadog'); await import('dialcache/prometheus'); await import('dialcache/redis-protocol'); await import('dialcache/node-redis'); await import('dialcache/valkey-glide')",
+      `const root = await import("dialcache");
+const glide = await import("dialcache/valkey-glide");
+await import("dialcache/datadog");
+await import("dialcache/prometheus");
+await import("dialcache/redis-protocol");
+await import("dialcache/node-redis");
+const adapter = glide.createValkeyGlideDialCacheClient({ invokeScript: async () => 2 });
+try {
+  await adapter.write({ valueKey: "value", cacheTtlMs: 1_000, value: "payload" });
+  throw new Error("Expected an invalid GLIDE script reply to fail");
+} catch (error) {
+  if (!(error instanceof root.DialCacheRedisProtocolError)) {
+    throw new Error("The GLIDE protocol error does not match the root ESM export");
+  }
+} finally {
+  adapter.dispose();
+}`,
     ],
     { cwd: workspace },
   );
@@ -411,7 +455,25 @@ try {
     process.execPath,
     [
       "--eval",
-      "require('dialcache'); require('dialcache/datadog'); require('dialcache/prometheus'); require('dialcache/redis-protocol'); require('dialcache/node-redis'); require('dialcache/valkey-glide')",
+      `const root = require("dialcache");
+const glide = require("dialcache/valkey-glide");
+require("dialcache/datadog");
+require("dialcache/prometheus");
+require("dialcache/redis-protocol");
+require("dialcache/node-redis");
+void (async () => {
+  const adapter = glide.createValkeyGlideDialCacheClient({ invokeScript: async () => 2 });
+  try {
+    await adapter.write({ valueKey: "value", cacheTtlMs: 1_000, value: "payload" });
+    throw new Error("Expected an invalid GLIDE script reply to fail");
+  } catch (error) {
+    if (!(error instanceof root.DialCacheRedisProtocolError)) {
+      throw new Error("The GLIDE protocol error does not match the root CommonJS export");
+    }
+  } finally {
+    adapter.dispose();
+  }
+})();`,
     ],
     { cwd: workspace },
   );

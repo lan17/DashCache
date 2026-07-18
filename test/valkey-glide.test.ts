@@ -4,8 +4,24 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DialCacheRedisPayloadEncodingError,
   DialCacheRedisPayloadError,
+  DialCacheRedisProtocolError,
 } from "../src/redis-client.js";
 import { createValkeyGlideDialCacheClient } from "../src/valkey-glide.js";
+
+const INVALID_WRITE_REPLIES: readonly unknown[] = [
+  -1,
+  2,
+  0.5,
+  Number.NaN,
+  Number.POSITIVE_INFINITY,
+  Number.NEGATIVE_INFINITY,
+  "1",
+  1n,
+  true,
+  null,
+  undefined,
+];
+const INVALID_INVALIDATION_REPLIES: readonly unknown[] = [0, ...INVALID_WRITE_REPLIES];
 
 const scriptInstances = vi.hoisted(() => [] as Array<{ code: string; release: ReturnType<typeof vi.fn> }>);
 
@@ -32,6 +48,17 @@ function fakeClient(...replies: unknown[]): FakeGlideClient {
   return {
     invokeScript: vi.fn(async () => replies.shift()),
   };
+}
+
+async function expectProtocolError(operation: Promise<unknown>, message: string): Promise<void> {
+  let rejection: unknown;
+  try {
+    await operation;
+  } catch (error) {
+    rejection = error;
+  }
+  expect(rejection).toBeInstanceOf(DialCacheRedisProtocolError);
+  expect(rejection).toMatchObject({ name: "DialCacheRedisProtocolError", message });
 }
 
 describe("Valkey GLIDE adapter", () => {
@@ -117,12 +144,56 @@ describe("Valkey GLIDE adapter", () => {
     await expect(adapter.read({ valueKey: "wrong-encoding" })).rejects.toBeInstanceOf(
       DialCacheRedisPayloadEncodingError,
     );
-    await expect(adapter.write({ valueKey: "bad-write", cacheTtlMs: 1_000, value: "value" })).rejects.toThrow(
-      "Invalid DialCache Redis write reply",
+    await expectProtocolError(
+      Promise.resolve(adapter.write({ valueKey: "bad-write", cacheTtlMs: 1_000, value: "value" })),
+      "Invalid DialCache Redis write reply; expected integer 0 or 1",
     );
-    await expect(
-      adapter.invalidate({ watermarkKey: "bad-watermark", futureBufferMs: 0, watermarkTtlFloorMs: 1_000 }),
-    ).rejects.toThrow("Invalid DialCache Redis invalidate reply");
+    await expectProtocolError(
+      Promise.resolve(
+        adapter.invalidate({ watermarkKey: "bad-watermark", futureBufferMs: 0, watermarkTtlFloorMs: 1_000 }),
+      ),
+      "Invalid DialCache Redis invalidate reply; expected integer 1",
+    );
+  });
+
+  it("rejects every out-of-domain write and invalidation reply", async () => {
+    const writeMessage = "Invalid DialCache Redis write reply; expected integer 0 or 1";
+    const invalidationMessage = "Invalid DialCache Redis invalidate reply; expected integer 1";
+
+    for (const reply of INVALID_WRITE_REPLIES) {
+      const untracked = createValkeyGlideDialCacheClient(fakeClient(reply) as never);
+      await expectProtocolError(
+        Promise.resolve(untracked.write({ valueKey: "plain:value", cacheTtlMs: 1_000, value: "plain" })),
+        writeMessage,
+      );
+      untracked.dispose();
+
+      const tracked = createValkeyGlideDialCacheClient(fakeClient(reply) as never);
+      await expectProtocolError(
+        Promise.resolve(tracked.write({
+          valueKey: "tracked:{id}:value",
+          watermarkKey: "tracked:{id}:watermark",
+          cacheTtlMs: 1_000,
+          value: "tracked",
+          watermarkTtlFloorMs: 2_000,
+        })),
+        writeMessage,
+      );
+      tracked.dispose();
+    }
+
+    for (const reply of INVALID_INVALIDATION_REPLIES) {
+      const adapter = createValkeyGlideDialCacheClient(fakeClient(reply) as never);
+      await expectProtocolError(
+        Promise.resolve(adapter.invalidate({
+          watermarkKey: "tracked:{id}:watermark",
+          futureBufferMs: 50,
+          watermarkTtlFloorMs: 2_000,
+        })),
+        invalidationMessage,
+      );
+      adapter.dispose();
+    }
   });
 
   it("releases every script exactly once and rejects later operations", async () => {

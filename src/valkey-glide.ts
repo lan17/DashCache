@@ -15,6 +15,10 @@ import {
   WRITE_CACHE_SCRIPT,
   WRITE_TRACKED_CACHE_SCRIPT,
 } from "./internal/redis-scripts.js";
+import {
+  validateRedisScriptInvalidationReply,
+  validateRedisScriptWriteReply,
+} from "./internal/redis-script-reply.js";
 import { DialCacheRedisPayloadError, type DialCacheRedisClient } from "./redis-client.js";
 
 type SupportedValkeyGlideClient = GlideClient | GlideClusterClient;
@@ -84,7 +88,7 @@ export function createValkeyGlideDialCacheClient(
             [valueKey, watermarkKey],
             [String(cacheTtlMs), String(encoding), value, String(request.watermarkTtlFloorMs)],
           );
-      return integerReply(raw, "write") === 1;
+      return validateRedisScriptWriteReply(raw) === 1;
     },
     async invalidate({ watermarkKey, futureBufferMs, watermarkTtlFloorMs }) {
       const raw = await invoke(
@@ -92,7 +96,7 @@ export function createValkeyGlideDialCacheClient(
         [watermarkKey],
         [String(futureBufferMs), String(watermarkTtlFloorMs)],
       );
-      integerReply(raw, "invalidate");
+      validateRedisScriptInvalidationReply(raw);
     },
     dispose() {
       if (disposed) {
@@ -107,11 +111,4 @@ export function createValkeyGlideDialCacheClient(
       }
     },
   };
-}
-
-function integerReply(reply: GlideReturnType, operation: string): number {
-  if (typeof reply !== "number") {
-    throw new Error(`Invalid DialCache Redis ${operation} reply`);
-  }
-  return reply;
 }

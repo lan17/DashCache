@@ -24,7 +24,11 @@ export { DialCache } from "./dialcache.js";
 export type { CacheKeySpec, CachedFn, CachedOptions, CachedValue } from "./dialcache.js";
 export { DialCacheKey, invalidationPrefix, normalizeArgs, redisClusterHashTag } from "./key.js";
 export type { DialCacheKeyInit } from "./key.js";
-export { DialCacheRedisPayloadEncodingError, DialCacheRedisPayloadError } from "./redis-client.js";
+export {
+  DialCacheRedisPayloadEncodingError,
+  DialCacheRedisPayloadError,
+  DialCacheRedisProtocolError,
+} from "./redis-client.js";
 export type { RedisConfig } from "./internal/redis-cache.js";
 export type {
   DialCacheRedisClient,

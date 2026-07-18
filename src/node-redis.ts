@@ -8,13 +8,18 @@ import {
   WRITE_TRACKED_CACHE_SCRIPT,
 } from "./internal/redis-scripts.js";
 import { decodeRedisPayload, redisPayloadEncoding } from "./internal/redis-payload.js";
+import {
+  validateRedisScriptInvalidationReply,
+  validateRedisScriptWriteReply,
+} from "./internal/redis-script-reply.js";
 import type { DialCacheRedisClient } from "./redis-client.js";
 
 type BufferReplyOptions = ReturnType<typeof commandOptions<{ readonly returnBuffers: true }>>;
 // Redis bulk strings are binary data; decoding them as UTF-8 would corrupt arbitrary serializer output.
 const bufferReplyOptions: BufferReplyOptions = commandOptions({ returnBuffers: true });
 const readReply = (reply: string | null): string | null => reply;
-const integerReply = (reply: number): number => reply;
+const writeReply = (reply: number): number => validateRedisScriptWriteReply(reply);
+const invalidationReply = (reply: number): number => validateRedisScriptInvalidationReply(reply);
 type NodeRedisArgument = string | Buffer;
 
 interface NodeRedisScript<Args extends Array<unknown>, Reply> {
@@ -94,7 +99,7 @@ export const dialcacheRedisScripts: DialCacheNodeRedisScripts = {
     ): Array<NodeRedisArgument> {
       return [valueKey, String(cacheTtlMs), String(encoding), payload];
     },
-    transformReply: integerReply,
+    transformReply: writeReply,
   }),
   dialcacheWriteTracked: defineDialCacheScript({
     SCRIPT: WRITE_TRACKED_CACHE_SCRIPT,
@@ -111,7 +116,7 @@ export const dialcacheRedisScripts: DialCacheNodeRedisScripts = {
     ): Array<NodeRedisArgument> {
       return [valueKey, watermarkKey, String(cacheTtlMs), String(encoding), payload, String(watermarkTtlFloorMs)];
     },
-    transformReply: integerReply,
+    transformReply: writeReply,
   }),
   dialcacheInvalidate: defineDialCacheScript({
     SCRIPT: INVALIDATE_CACHE_SCRIPT,
@@ -121,7 +126,7 @@ export const dialcacheRedisScripts: DialCacheNodeRedisScripts = {
     transformArguments(watermarkKey: string, futureBufferMs: number, watermarkTtlFloorMs: number): Array<string> {
       return [watermarkKey, String(futureBufferMs), String(watermarkTtlFloorMs)];
     },
-    transformReply: integerReply,
+    transformReply: invalidationReply,
   }),
 };
 
@@ -165,10 +170,11 @@ export function createNodeRedisDialCacheClient(client: NodeRedisScriptClient): D
             value,
             request.watermarkTtlFloorMs,
           );
-      return result === 1;
+      return validateRedisScriptWriteReply(result) === 1;
     },
     async invalidate({ watermarkKey, futureBufferMs, watermarkTtlFloorMs }) {
-      await client.dialcacheInvalidate(watermarkKey, futureBufferMs, watermarkTtlFloorMs);
+      const result = await client.dialcacheInvalidate(watermarkKey, futureBufferMs, watermarkTtlFloorMs);
+      validateRedisScriptInvalidationReply(result);
     },
   };
 }
