@@ -39,7 +39,10 @@ const remoteConfig = new DialCacheKeyConfig({
   ramp: { [CacheLayer.REMOTE]: 100 },
 });
 
-function metricsWithError(error: DialCacheMetricsAdapter["error"]): DialCacheMetricsAdapter {
+function metricsWithError(
+  error: DialCacheMetricsAdapter["error"],
+  observeFallback: DialCacheMetricsAdapter["observeFallback"] = vi.fn(),
+): DialCacheMetricsAdapter {
   return {
     request: vi.fn(),
     miss: vi.fn(),
@@ -47,15 +50,21 @@ function metricsWithError(error: DialCacheMetricsAdapter["error"]): DialCacheMet
     error,
     invalidation: vi.fn(),
     observeGet: vi.fn(),
-    observeFallback: vi.fn(),
+    observeFallback,
     observeSerialization: vi.fn(),
     observeSize: vi.fn(),
   };
 }
 
+function useFakeTimersWithMonotonicClock(): void {
+  vi.useFakeTimers();
+  const clockOriginMs = Date.now();
+  vi.spyOn(performance, "now").mockImplementation(() => Date.now() - clockOriginMs);
+}
+
 describe("DialCache fallback liveness", () => {
   beforeEach(() => {
-    vi.useFakeTimers();
+    useFakeTimersWithMonotonicClock();
   });
 
   afterEach(() => {
@@ -69,7 +78,9 @@ describe("DialCache fallback liveness", () => {
     const gate = deferred<{ readonly id: string }>();
     const started = deferred<void>();
     const error = vi.fn<DialCacheMetricsAdapter["error"]>();
-    const dialcache = new DialCache({ metrics: metricsWithError(error) });
+    const observeFallback = vi.fn<DialCacheMetricsAdapter["observeFallback"]>();
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const dialcache = new DialCache({ metrics: metricsWithError(error, observeFallback) });
     let calls = 0;
     const getUser = dialcache.cached(async (id: string) => {
       calls += 1;
@@ -93,6 +104,7 @@ describe("DialCache fallback liveness", () => {
       activeFollowers: 2,
     });
     expect(dialcache.getCoalescingState().process.oldestLeaderAgeMs).toBeGreaterThanOrEqual(0);
+    expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
 
     nowMs = 59_999;
     await vi.advanceTimersByTimeAsync(59_999);
@@ -120,11 +132,48 @@ describe("DialCache fallback liveness", () => {
       error: "fallback",
       inFallback: true,
     });
+    expect(observeFallback).toHaveBeenCalledTimes(1);
+    expect(observeFallback).toHaveBeenCalledWith({
+      cacheNamespace: "urn",
+      useCase: "DefaultFallbackDeadline",
+      keyType: "user_id",
+      layer: CacheLayer.LOCAL,
+    }, 60);
     expect(dialcache.getCoalescingState().process).toEqual({
       activeLeaders: 0,
       activeFollowers: 0,
       oldestLeaderAgeMs: null,
     });
+
+    gate.resolve({ id: "late" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(observeFallback).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a pending fallback deadline referenced", async () => {
+    const started = deferred<void>();
+    const gate = deferred<string>();
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const dialcache = new DialCache();
+    const load = dialcache.cached(async () => {
+      started.resolve();
+      return await gate.promise;
+    }, {
+      keyType: "id",
+      useCase: "ReferencedFallbackDeadline",
+      cacheKey: () => "123",
+      fallbackTimeoutMs: 10_000,
+      defaultConfig: localConfig,
+    });
+
+    const result = dialcache.enable(async () => await load());
+    await started.promise;
+
+    const timer = setTimeoutSpy.mock.results[0]?.value as NodeJS.Timeout | undefined;
+    expect(timer?.hasRef()).toBe(true);
+
+    gate.resolve("value");
+    await expect(result).resolves.toBe("value");
   });
 
   it("uses a caller-selected timeout on enabled pass-through calls", async () => {
@@ -250,6 +299,151 @@ describe("DialCache fallback liveness", () => {
       timeoutMs: 10,
     });
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("rechecks the monotonic deadline when a timer fires early", async () => {
+    let nowMs = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => nowMs);
+    const fakeSetTimeout = globalThis.setTimeout;
+    let scheduledTimers = 0;
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((
+      callback: (...args: unknown[]) => void,
+      delay?: number,
+      ...args: unknown[]
+    ) => {
+      scheduledTimers += 1;
+      const adjustedDelay = scheduledTimers === 1 ? Math.max((delay ?? 0) - 1, 0) : delay;
+      return fakeSetTimeout(callback, adjustedDelay, ...args);
+    }) as typeof setTimeout);
+    const started = deferred<void>();
+    const dialcache = new DialCache();
+    const load = dialcache.cached(async () => {
+      started.resolve();
+      return await new Promise<string>(() => undefined);
+    }, {
+      keyType: "id",
+      useCase: "EarlyFallbackTimer",
+      cacheKey: () => "123",
+      fallbackTimeoutMs: 10,
+      defaultConfig: localConfig,
+    });
+
+    const result = Promise.allSettled([dialcache.enable(async () => await load())]);
+    await started.promise;
+    nowMs = 9;
+    await vi.advanceTimersByTimeAsync(9);
+
+    expect(setTimeoutSpy).toHaveBeenCalledTimes(2);
+    expect(dialcache.getCoalescingState().process.activeLeaders).toBe(1);
+
+    nowMs = 10;
+    await vi.advanceTimersByTimeAsync(1);
+    expect((await result)[0]).toEqual({ status: "rejected", reason: expect.any(FallbackTimeoutError) });
+  });
+
+  it("rejects an async result that settles after its monotonic deadline before the timer callback", async () => {
+    let nowMs = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => nowMs);
+    const gate = deferred<string>();
+    const started = deferred<void>();
+    const dialcache = new DialCache();
+    let calls = 0;
+    const load = dialcache.cached(async () => {
+      calls += 1;
+      if (calls === 1) {
+        started.resolve();
+        return await gate.promise;
+      }
+      return "fresh";
+    }, {
+      keyType: "id",
+      useCase: "DelayedFallbackTimer",
+      cacheKey: () => "123",
+      fallbackTimeoutMs: 10,
+      defaultConfig: localConfig,
+    });
+
+    const first = Promise.allSettled([dialcache.enable(async () => await load())]);
+    await started.promise;
+    nowMs = 10;
+    gate.resolve("overdue");
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect((await first)[0]).toEqual({ status: "rejected", reason: expect.any(FallbackTimeoutError) });
+    expect(vi.getTimerCount()).toBe(0);
+    await expect(dialcache.enable(async () => await load())).resolves.toBe("fresh");
+    expect(calls).toBe(2);
+  });
+
+  it("times out fallback after cache-key construction fails", async () => {
+    const started = deferred<void>();
+    const dialcache = new DialCache({ logger: { debug: vi.fn(), error: vi.fn(), warn: vi.fn() } });
+    const load = dialcache.cached(async () => {
+      started.resolve();
+      return await new Promise<string>(() => undefined);
+    }, {
+      keyType: "id",
+      useCase: "KeyFailureFallbackDeadline",
+      cacheKey: () => {
+        throw new Error("invalid key");
+      },
+      fallbackTimeoutMs: 5,
+    });
+
+    const result = Promise.allSettled([dialcache.enable(async () => await load())]);
+    await started.promise;
+    await vi.advanceTimersByTimeAsync(5);
+    expect((await result)[0]).toEqual({ status: "rejected", reason: expect.any(FallbackTimeoutError) });
+  });
+
+  it("times out fallback after runtime config resolution fails", async () => {
+    const started = deferred<void>();
+    const dialcache = new DialCache({
+      cacheConfigProvider: async () => {
+        throw new Error("config unavailable");
+      },
+      logger: { debug: vi.fn(), error: vi.fn(), warn: vi.fn() },
+    });
+    const load = dialcache.cached(async () => {
+      started.resolve();
+      return await new Promise<string>(() => undefined);
+    }, {
+      keyType: "id",
+      useCase: "ConfigFailureFallbackDeadline",
+      cacheKey: () => "123",
+      fallbackTimeoutMs: 5,
+    });
+
+    const result = Promise.allSettled([dialcache.enable(async () => await load())]);
+    await started.promise;
+    await vi.advanceTimersByTimeAsync(5);
+    expect((await result)[0]).toEqual({ status: "rejected", reason: expect.any(FallbackTimeoutError) });
+  });
+
+  it("times out detached fallback after config resolves outside its closed enabled scope", async () => {
+    const configGate = deferred<DialCacheKeyConfig>();
+    const started = deferred<void>();
+    const dialcache = new DialCache({ cacheConfigProvider: async () => await configGate.promise });
+    const load = dialcache.cached(async () => {
+      started.resolve();
+      return await new Promise<string>(() => undefined);
+    }, {
+      keyType: "id",
+      useCase: "DetachedFallbackDeadline",
+      cacheKey: () => "123",
+      fallbackTimeoutMs: 5,
+    });
+    let detached!: Promise<string>;
+
+    await dialcache.enable(() => {
+      detached = load();
+    });
+    configGate.resolve(localConfig);
+    await started.promise;
+    const result = Promise.allSettled([detached]);
+    await vi.advanceTimersByTimeAsync(5);
+
+    expect((await result)[0]).toEqual({ status: "rejected", reason: expect.any(FallbackTimeoutError) });
   });
 
   it("keeps initially disabled calls as true pass-through", async () => {
@@ -425,7 +619,7 @@ describe("DialCache fallback liveness", () => {
 
 describe("DialCache coalescing state", () => {
   beforeEach(() => {
-    vi.useFakeTimers();
+    useFakeTimersWithMonotonicClock();
   });
 
   afterEach(() => {
@@ -443,6 +637,7 @@ describe("DialCache coalescing state", () => {
     const dialcache = new DialCache();
     const load = dialcache.cached(async (id: string) => {
       if (id === "first") {
+        nowMs += 25;
         firstStarted.resolve();
         return await firstGate.promise;
       }
@@ -461,29 +656,34 @@ describe("DialCache coalescing state", () => {
 
     const firstLeader = dialcache.enable(async () => await load("first"));
     const firstFollower = dialcache.enable(async () => await load("first"));
-    const secondFollower = dialcache.enable(async () => await load("first"));
+    const additionalFirstFollower = dialcache.enable(async () => await load("first"));
     await firstStarted.promise;
     nowMs = 1_040;
     const secondLeader = dialcache.enable(async () => await load("second"));
+    const secondFollower = dialcache.enable(async () => await load("second"));
     await secondStarted.promise;
     nowMs = 1_100;
 
     expect(dialcache.getCoalescingState()).toEqual({
-      process: { activeLeaders: 2, activeFollowers: 2, oldestLeaderAgeMs: 100 },
+      process: { activeLeaders: 2, activeFollowers: 3, oldestLeaderAgeMs: 100 },
     });
 
     firstGate.resolve("first-value");
-    await expect(Promise.all([firstLeader, firstFollower, secondFollower])).resolves.toEqual([
+    await expect(Promise.all([firstLeader, firstFollower, additionalFirstFollower])).resolves.toEqual([
       "first-value",
       "first-value",
       "first-value",
     ]);
     expect(dialcache.getCoalescingState()).toEqual({
-      process: { activeLeaders: 1, activeFollowers: 0, oldestLeaderAgeMs: 60 },
+      process: { activeLeaders: 1, activeFollowers: 1, oldestLeaderAgeMs: 60 },
     });
 
     secondGate.reject(new Error("second failed"));
-    await expect(secondLeader).rejects.toThrow("second failed");
+    const secondResults = await Promise.allSettled([secondLeader, secondFollower]);
+    expect(secondResults).toEqual([
+      { status: "rejected", reason: expect.objectContaining({ message: "second failed" }) },
+      { status: "rejected", reason: expect.objectContaining({ message: "second failed" }) },
+    ]);
     expect(dialcache.getCoalescingState()).toEqual({
       process: { activeLeaders: 0, activeFollowers: 0, oldestLeaderAgeMs: null },
     });

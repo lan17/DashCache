@@ -9,6 +9,8 @@ const coalescingFanout = readPositiveInteger("DIALCACHE_BENCH_FANOUT", 1_000);
 
 const results = [
   await benchmarkSequentialRequestLocalHits(sequentialIterations),
+  await benchmarkSequentialProcessLocalHits(sequentialIterations),
+  await benchmarkEnabledFallbacks(sequentialIterations),
   await benchmarkRequestLocalCoalescing(coalescingFanout),
   await benchmarkProcessCoalescing(coalescingFanout),
 ];
@@ -55,6 +57,71 @@ async function benchmarkSequentialRequestLocalHits(iterations) {
 
   assert.equal(fallbackCalls, 1, "sequential request-local hits should execute the fallback once");
   return { scenario: "request-local sequential hits", operations: iterations, elapsedMs, fallbackCalls };
+}
+
+async function benchmarkSequentialProcessLocalHits(iterations) {
+  const dialcache = new DialCache();
+  let fallbackCalls = 0;
+  const getValue = dialcache.cached(
+    async (id) => {
+      fallbackCalls += 1;
+      return { id };
+    },
+    {
+      keyType: "benchmark_id",
+      useCase: "BenchmarkProcessLocalSequential",
+      cacheKey: (id) => id,
+      defaultConfig: new DialCacheKeyConfig({
+        ttlSec: { [CacheLayer.LOCAL]: 60 },
+        ramp: { [CacheLayer.LOCAL]: 100 },
+      }),
+    },
+  );
+
+  let elapsedMs = 0;
+  await dialcache.enable(async () => {
+    const expected = await getValue("shared");
+    let actual = expected;
+    const start = performance.now();
+    for (let index = 0; index < iterations; index += 1) {
+      actual = await getValue("shared");
+    }
+    elapsedMs = performance.now() - start;
+    assert.strictEqual(actual, expected);
+  });
+
+  assert.equal(fallbackCalls, 1, "process-local hits should reuse the first fallback value");
+  return { scenario: "process-local sequential hits", operations: iterations, elapsedMs, fallbackCalls };
+}
+
+async function benchmarkEnabledFallbacks(iterations) {
+  const dialcache = new DialCache();
+  let fallbackCalls = 0;
+  const getValue = dialcache.cached(
+    async (id) => {
+      fallbackCalls += 1;
+      return id;
+    },
+    {
+      keyType: "benchmark_id",
+      useCase: "BenchmarkEnabledFallbacks",
+      cacheKey: (id) => id,
+    },
+  );
+
+  let elapsedMs = 0;
+  await dialcache.enable(async () => {
+    await getValue("warmup");
+    fallbackCalls = 0;
+    const start = performance.now();
+    for (let index = 0; index < iterations; index += 1) {
+      await getValue("shared");
+    }
+    elapsedMs = performance.now() - start;
+  });
+
+  assert.equal(fallbackCalls, iterations, "enabled uncached calls should each run a bounded fallback");
+  return { scenario: "enabled bounded fallbacks", operations: iterations, elapsedMs, fallbackCalls };
 }
 
 async function benchmarkRequestLocalCoalescing(fanout) {

@@ -650,10 +650,11 @@ export class DialCache {
       return existing.promise as Promise<T>;
     }
 
+    const startedAtMs = performance.now();
     const promise = run();
     const flight: ProcessFlight = {
       promise,
-      startedAtMs: performance.now(),
+      startedAtMs,
       followers: 0,
     };
     this.processFlights.set(key.urn, flight);
@@ -721,6 +722,19 @@ function withFallbackTimeout<T>(
       clearTimer();
       reject(new FallbackTimeoutError(useCase, timeoutMs));
     };
+    const onTimer = (): void => {
+      timer = null;
+      if (settled) {
+        return;
+      }
+
+      const remainingMs = timeoutMs - elapsedMs();
+      if (remainingMs > 0) {
+        timer = setTimeout(onTimer, Math.ceil(remainingMs));
+        return;
+      }
+      rejectTimeout();
+    };
     const settleBeforeDeadline = (settle: () => void): void => {
       if (settled) {
         return;
@@ -738,8 +752,7 @@ function withFallbackTimeout<T>(
     if (remainingMs <= 0) {
       rejectTimeout();
     } else {
-      timer = setTimeout(rejectTimeout, remainingMs);
-      timer.unref();
+      timer = setTimeout(onTimer, Math.ceil(remainingMs));
     }
 
     void operation.then(
