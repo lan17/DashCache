@@ -3,17 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/dialcache.svg)](https://www.npmjs.com/package/dialcache)
 [![Codecov](https://codecov.io/gh/lan17/DialCache/branch/main/graph/badge.svg)](https://codecov.io/gh/lan17/DialCache)
 
-DialCache is a read-through caching library for TypeScript services. It wraps async functions with a layered cache — request-local memoization, a process-local TTL/LRU, and a Redis TTL cache — behind explicit enabled contexts, so caching is opt-in per call path and stays off in write paths. Rollout and operation are first-class: every layer has runtime TTL and percentage-ramp controls, reads fail open, hot keys coalesce, and observability plugs in through adapters.
-
-- **Layered read-through** — request-local → process-local → Redis → your function, each layer configured independently per use case
-- **Off by default** — caching runs only inside `enable()` scopes (Node `AsyncLocalStorage`), so a write path never caches a stale read
-- **Runtime rollout controls** — per-layer TTLs and deterministic percentage ramps, overridable per invocation by a config provider
-- **Request coalescing** — request- and instance-scoped single-flight with a bounded fallback deadline
-- **Targeted invalidation** — Redis watermarks keyed by `keyType` + `id`, with Redis Cluster-safe hash tags
-- **Stable keys** — namespaced, percent-encoded, collision-safe key construction
-- **Fail-open reads, fail-loud invalidation** — cache errors are logged, counted, and fall through; invalidation failures rethrow
-- **Adapter-based observability** — Prometheus, Datadog (DogStatsD), or custom metrics adapters; no metrics dependency unless you opt in
-- **Redis client adapters** — node-redis and Valkey GLIDE, covering standalone Redis, Valkey, and Redis Cluster
+Fine-grained TypeScript caching with explicit enabled contexts, request-local memoization, process-local and Redis TTL caching, stable key construction, runtime rollout controls, request coalescing, adapter-based observability, and Redis watermark-based targeted invalidation.
 
 ## Contents
 
