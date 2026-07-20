@@ -16,7 +16,6 @@ export type {
 } from "./metrics.js";
 export {
   DialCacheError,
-  MissingKeyConfigError,
   UseCaseIsAlreadyRegisteredError,
   UseCaseNameIsReservedError,
 } from "./errors.js";

@@ -30,6 +30,8 @@ const rootConsumer = `import {
   type RedisConfig,
   type Serializer,
 } from "dialcache";
+// @ts-expect-error The unused MissingKeyConfigError class was removed instead of deprecated.
+import { MissingKeyConfigError } from "dialcache";
 import { createNodeRedisDialCacheClient } from "dialcache/node-redis";
 import { READ_CACHE_SCRIPT } from "dialcache/redis-protocol";
 import {
@@ -254,6 +256,7 @@ void requestLocalCoalescingScope;
 void boundedErrorKind;
 void disabledReasons;
 void legacyMissingConfigReason;
+void MissingKeyConfigError;
 void metricErrorKinds;
 void unboundedErrorKind;
 void createNodeRedisDialCacheClient;
@@ -401,6 +404,9 @@ try {
     throw new Error("The node-redis protocol error does not match the root ESM export");
   }
 }
+if ("MissingKeyConfigError" in root) {
+  throw new Error("The removed MissingKeyConfigError class must not be exported from the root ESM entry");
+}
 let calls = 0;
 const overlayCache = new root.DialCache({
   cacheConfigProvider: () => new root.DialCacheKeyConfig({
@@ -438,6 +444,9 @@ try {
   if (!(error instanceof root.DialCacheRedisProtocolError)) {
     throw new Error("The node-redis protocol error does not match the root CommonJS export");
   }
+}
+if ("MissingKeyConfigError" in root) {
+  throw new Error("The removed MissingKeyConfigError class must not be exported from the root CommonJS entry");
 }
 void (async () => {
   let calls = 0;
