@@ -198,7 +198,7 @@ function collectorConfigs(prefix: string) {
     fallbackTimer: {
       type: "histogram",
       name: `${prefix}dialcache_fallback_timer`,
-      help: "Time spent in the underlying fallback function in seconds.",
+      help: "Time DialCache waited for the fallback function in seconds.",
       labelNames: ["cache_namespace", "use_case", "key_type", "layer"],
       buckets: TIMER_BUCKETS,
     },

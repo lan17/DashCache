@@ -11,7 +11,9 @@ import { fetchKeyConfig, resolveLayerConfigResult, type ResolvedLayerConfig } fr
 export interface RedisConfig {
   /**
    * Caller-created, connected, and lifecycle-owned semantic Redis client.
-   * DialCache borrows it and never drains, disposes, or closes it.
+   * DialCache borrows it and never adds command deadlines or drains, disposes,
+   * or closes it. Every client operation must settle within a finite
+   * application-defined budget.
    */
   readonly client: DialCacheRedisClient;
   readonly serializer?: Serializer<unknown>;

@@ -151,7 +151,10 @@ interface NodeRedisScriptClient {
 
 /**
  * Create a resource-free semantic view over a caller-owned node-redis client.
- * The caller remains responsible for draining work and closing the client.
+ * The adapter preserves the wrapped script commands' lifetimes; node-redis
+ * `connectTimeout` alone is not a command deadline. The caller remains
+ * responsible for finite command settlement, draining work, and closing the
+ * client.
  */
 export function createNodeRedisDialCacheClient(client: NodeRedisScriptClient): DialCacheRedisClient {
   return {

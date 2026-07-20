@@ -11,14 +11,13 @@ import {
   type Logger,
 } from "./config.js";
 import { DialCacheContext, getOrCreateRequestLocalCache, type RequestLocalCache } from "./context.js";
-import { UseCaseIsAlreadyRegisteredError, UseCaseNameIsReservedError } from "./errors.js";
+import { FallbackTimeoutError, UseCaseIsAlreadyRegisteredError, UseCaseNameIsReservedError } from "./errors.js";
 import { DialCacheKey, assertValidNamespace, normalizeArgs } from "./key.js";
 import {
   NO_CACHE_LAYER,
   REQUEST_LOCAL_CACHE_LAYER,
   labelsFor,
   type CacheMetricLabels,
-  type CoalescingScope,
   type DialCacheMetricsAdapter,
   type MetricErrorKind,
   type MetricLayer,
@@ -106,6 +105,18 @@ interface CachedOptionsBase<Fn extends AnyFn> {
   readonly defaultConfig?: DialCacheKeyConfig | null;
   readonly trackForInvalidation?: boolean;
   /**
+   * Monotonic deadline applied once an initially enabled invocation starts its
+   * fallback, in milliseconds. Must be at most 2,147,483,647. Defaults to 60
+   * seconds. Set to `null` to disable the deadline. Like every JavaScript
+   * timer, delivery requires event-loop progress and cannot preempt synchronous
+   * work.
+   *
+   * Concurrent same-key callers share the leader's remaining budget. Timing
+   * out rejects those callers and prevents the eventual result from being
+   * published by DialCache, but does not cancel the underlying operation.
+   */
+  readonly fallbackTimeoutMs?: number | null;
+  /**
    * Select every input dimension that can affect the returned value. Concurrent
    * enabled calls with the same cache key may share one in-flight execution.
    */
@@ -130,7 +141,27 @@ export type CachedOptions<Fn extends AnyFn> = CachedOptionsBase<Fn> & Serializer
  */
 export type CachedFn<Fn extends AnyFn> = (...args: Parameters<Fn>) => Promise<CachedValue<Fn>>;
 
+/** Exact process-scoped single-flight state for one DialCache instance. */
+export interface ProcessCoalescingState {
+  readonly activeLeaders: number;
+  readonly activeFollowers: number;
+  readonly oldestLeaderAgeMs: number | null;
+}
+
+/** A point-in-time snapshot of DialCache-owned coalescing state. */
+export interface CoalescingState {
+  readonly process: ProcessCoalescingState;
+}
+
+interface ProcessFlight {
+  promise: Promise<unknown> | null;
+  readonly startedAtMs: number;
+  followers: number;
+}
+
 const DEFAULT_LOCAL_MAX_SIZE = 10_000;
+const DEFAULT_FALLBACK_TIMEOUT_MS = 60_000;
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 const defaultConfigProvider: CacheConfigProvider = () => null;
 const defaultLogger: Logger = console;
 
@@ -144,7 +175,8 @@ export class DialCache {
   private readonly rampSampler: CacheRampSampler;
   private readonly redisCache: RedisCache | null;
   private readonly metrics: DialCacheMetricsAdapter | null;
-  private readonly inFlight = new Map<string, Promise<unknown>>();
+  private readonly processFlights = new Map<string, ProcessFlight>();
+  private activeProcessFollowers = 0;
 
   constructor(config: DialCacheConfig = {}) {
     if (Object.hasOwn(config, "urnPrefix")) {
@@ -196,17 +228,31 @@ export class DialCache {
     return this.context.isEnabled();
   }
 
+  /** Returns exact process-scoped single-flight state for this instance. */
+  getCoalescingState(): CoalescingState {
+    const oldestFlight = this.processFlights.values().next().value as ProcessFlight | undefined;
+    return {
+      process: {
+        activeLeaders: this.processFlights.size,
+        activeFollowers: this.activeProcessFollowers,
+        oldestLeaderAgeMs:
+          oldestFlight === undefined ? null : Math.max(performance.now() - oldestFlight.startedAtMs, 0),
+      },
+    };
+  }
+
   /**
    * Wraps a function with the configured cache chain. Returned in-memory
    * values are shared by reference and must be treated as immutable.
    */
   cached<Fn extends AnyFn>(fn: Fn, options: CachedOptions<Fn>): CachedFn<Fn> {
     const defaultConfig = snapshotDefaultConfig(options.defaultConfig);
+    const fallbackTimeoutMs = resolveFallbackTimeoutMs(options.fallbackTimeoutMs);
     this.registerUseCase(options.useCase);
 
     const run = async (...args: Parameters<Fn>): Promise<CachedValue<Fn>> => {
       // `fn`'s awaited result is the cached value by construction; the generic `Fn` erases it to `unknown`.
-      const fallback = async (): Promise<CachedValue<Fn>> => (await fn(...args)) as CachedValue<Fn>;
+      const rawFallback = async (): Promise<CachedValue<Fn>> => (await fn(...args)) as CachedValue<Fn>;
       const noLayerLabels = {
         cacheNamespace: this.namespace,
         useCase: options.useCase,
@@ -216,8 +262,11 @@ export class DialCache {
 
       if (!this.isEnabled()) {
         this.metrics?.disabled({ ...noLayerLabels, reason: "context" });
-        return await fallback();
+        return await rawFallback();
       }
+
+      const fallback = (): Promise<CachedValue<Fn>> =>
+        withFallbackTimeout(rawFallback, options.useCase, fallbackTimeoutMs);
 
       let key: DialCacheKey;
       try {
@@ -324,7 +373,7 @@ export class DialCache {
     keyConfig: DialCacheKeyConfig,
     fallback: () => Promise<T>,
   ): Promise<T> {
-    return await this.singleFlight(requestLocalCache.inFlight, key, "request_local", async () => {
+    return await this.singleFlightRequestLocal(requestLocalCache.inFlight, key, async () => {
       const start = performance.now();
       const result = requestLocalCache.read<T>(key.urn);
       this.metrics?.request(labelsFor(key, REQUEST_LOCAL_CACHE_LAYER));
@@ -348,7 +397,7 @@ export class DialCache {
   ): Promise<T> {
     const localLayer = await this.resolveLocalLayerConfig(key, keyConfig);
     if (localLayer.status === "enabled") {
-      return await this.singleFlight(this.inFlight, key, "process", async () =>
+      return await this.singleFlightProcess(key, async () =>
         await this.getThroughActiveLocal(key, keyConfig, localLayer.config, fallback),
       );
     }
@@ -364,7 +413,7 @@ export class DialCache {
       return await this.callFallback(labelsFor(key, fallbackLayer), fallback);
     }
 
-    return await this.singleFlight(this.inFlight, key, "process", async () => {
+    return await this.singleFlightProcess(key, async () => {
       const remote = await this.readRemoteWithResolvedConfig<T>(redisCache, key, remoteLayer.config);
       return await this.finishRedisChain(redisCache, key, localLayer, remote, fallback, remoteLayer.config);
     });
@@ -568,10 +617,9 @@ export class DialCache {
     });
   }
 
-  private singleFlight<T>(
+  private singleFlightRequestLocal<T>(
     inFlight: Map<string, Promise<unknown>>,
     key: DialCacheKey,
-    scope: CoalescingScope,
     run: () => Promise<T>,
   ): Promise<T> {
     const existing = inFlight.get(key.urn);
@@ -580,7 +628,7 @@ export class DialCache {
         cacheNamespace: key.namespace,
         useCase: key.useCase,
         keyType: key.keyType,
-        scope,
+        scope: "request_local",
       });
       return existing as Promise<T>;
     }
@@ -590,6 +638,49 @@ export class DialCache {
     const clear = (): void => {
       if (inFlight.get(key.urn) === promise) {
         inFlight.delete(key.urn);
+      }
+    };
+    void promise.then(clear, clear);
+    return promise;
+  }
+
+  private singleFlightProcess<T>(key: DialCacheKey, run: () => Promise<T>): Promise<T> {
+    const existing = this.processFlights.get(key.urn);
+    if (existing !== undefined) {
+      if (existing.promise === null) {
+        throw new Error("DialCache process flight was joined before initialization");
+      }
+      existing.followers += 1;
+      this.activeProcessFollowers += 1;
+      this.metrics?.coalesced?.({
+        cacheNamespace: key.namespace,
+        useCase: key.useCase,
+        keyType: key.keyType,
+        scope: "process",
+      });
+      return existing.promise as Promise<T>;
+    }
+
+    const flight: ProcessFlight = {
+      promise: null,
+      startedAtMs: performance.now(),
+      followers: 0,
+    };
+    this.processFlights.set(key.urn, flight);
+    let promise: Promise<T>;
+    try {
+      promise = run();
+    } catch (error) {
+      if (this.processFlights.get(key.urn) === flight) {
+        this.processFlights.delete(key.urn);
+      }
+      throw error;
+    }
+    flight.promise = promise;
+    const clear = (): void => {
+      if (this.processFlights.get(key.urn) === flight) {
+        this.activeProcessFollowers -= flight.followers;
+        this.processFlights.delete(key.urn);
       }
     };
     void promise.then(clear, clear);
@@ -661,6 +752,93 @@ function assertDefaultLayerMap(config: unknown, name: "ttlSec" | "ramp"): void {
   if (config === null || typeof config !== "object" || Array.isArray(config)) {
     throw new TypeError(`DialCache defaultConfig ${name} must be a layer map`);
   }
+}
+
+function resolveFallbackTimeoutMs(value: number | null | undefined): number | null {
+  if (value === null) {
+    return null;
+  }
+
+  const timeoutMs = value ?? DEFAULT_FALLBACK_TIMEOUT_MS;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > MAX_TIMER_DELAY_MS) {
+    throw new RangeError(
+      `DialCache fallbackTimeoutMs must be null or a positive safe integer no greater than ${MAX_TIMER_DELAY_MS}`,
+    );
+  }
+  return timeoutMs;
+}
+
+function withFallbackTimeout<T>(
+  fallback: () => Promise<T>,
+  useCase: string,
+  timeoutMs: number | null,
+): Promise<T> {
+  if (timeoutMs === null) {
+    return fallback();
+  }
+
+  const startedAtMs = performance.now();
+  const operation = fallback();
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    let timer: NodeJS.Timeout | null = null;
+    const elapsedMs = (): number => Math.max(performance.now() - startedAtMs, 0);
+    const clearTimer = (): void => {
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    };
+    const rejectTimeout = (): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimer();
+      reject(new FallbackTimeoutError(useCase, timeoutMs));
+    };
+    const onTimer = (): void => {
+      timer = null;
+      if (settled) {
+        return;
+      }
+
+      const remainingMs = timeoutMs - elapsedMs();
+      if (remainingMs > 0) {
+        timer = setTimeout(onTimer, Math.ceil(remainingMs));
+        return;
+      }
+      rejectTimeout();
+    };
+    const settleBeforeDeadline = (settle: () => void): void => {
+      if (settled) {
+        return;
+      }
+      if (elapsedMs() >= timeoutMs) {
+        rejectTimeout();
+        return;
+      }
+      settled = true;
+      clearTimer();
+      settle();
+    };
+
+    const remainingMs = timeoutMs - elapsedMs();
+    if (remainingMs <= 0) {
+      rejectTimeout();
+    } else {
+      timer = setTimeout(onTimer, Math.ceil(remainingMs));
+    }
+
+    void operation.then(
+      (value) => {
+        settleBeforeDeadline(() => resolve(value));
+      },
+      (error: unknown) => {
+        settleBeforeDeadline(() => reject(error));
+      },
+    );
+  });
 }
 
 function safeLogger(logger: Logger): Logger {

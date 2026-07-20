@@ -1,7 +1,9 @@
 import type { Awaitable } from "./config.js";
 
 export interface Serializer<T = unknown> {
+  /** Async implementations must settle within an application-defined deadline. */
   dump(value: T): Awaitable<string | Buffer>;
+  /** Async implementations must settle within an application-defined deadline. */
   load(value: string | Buffer): Awaitable<T>;
 }
 

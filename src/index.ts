@@ -16,11 +16,19 @@ export type {
 } from "./metrics.js";
 export {
   DialCacheError,
+  FallbackTimeoutError,
   UseCaseIsAlreadyRegisteredError,
   UseCaseNameIsReservedError,
 } from "./errors.js";
 export { DialCache } from "./dialcache.js";
-export type { CacheKeySpec, CachedFn, CachedOptions, CachedValue } from "./dialcache.js";
+export type {
+  CacheKeySpec,
+  CachedFn,
+  CachedOptions,
+  CachedValue,
+  CoalescingState,
+  ProcessCoalescingState,
+} from "./dialcache.js";
 export { DialCacheKey, invalidationPrefix, normalizeArgs, redisClusterHashTag } from "./key.js";
 export type { DialCacheKeyInit } from "./key.js";
 export {

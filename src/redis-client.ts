@@ -75,6 +75,12 @@ export interface RedisInvalidationRequest {
 /**
  * Caller-owned semantic Redis boundary. DialCache borrows this client and does
  * not create, connect, drain, dispose, or close it.
+ *
+ * Every method must settle within a finite application-defined deadline that
+ * includes connection, retry, offline-queue, dispatch, and response time.
+ * DialCache does not add Redis deadlines or server-side cancellation. A
+ * command that times out after dispatch may still have executed, so adapters
+ * must document their queue-removal and ambiguous-write semantics.
  */
 export interface DialCacheRedisClient {
   /** Atomically read and validate a value against its watermark when tracked. */

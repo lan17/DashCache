@@ -38,7 +38,9 @@ export interface ValkeyGlideDialCacheClient extends DialCacheRedisClient {
 
 /**
  * Wrap a caller-owned GLIDE connection. The returned adapter owns only its
- * Script handles; callers dispose those after draining work, then close GLIDE.
+ * Script handles and preserves the connection's `requestTimeout`; callers
+ * dispose the handles after draining work, then close GLIDE. A request timeout
+ * bounds client waiting but is not server-side command cancellation.
  */
 export function createValkeyGlideDialCacheClient(
   client: SupportedValkeyGlideClient,

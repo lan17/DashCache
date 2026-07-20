@@ -110,6 +110,9 @@ import { createNodeRedisDialCacheClient, dialcacheRedisScripts } from "dialcache
 const redisClient = createClient({
   url: process.env.REDIS_URL,
   scripts: dialcacheRedisScripts,
+  disableOfflineQueue: true,
+  commandsQueueMaxLength: 1_000,
+  socket: { connectTimeout: 2_000 },
 });
 await redisClient.connect();
 
@@ -135,6 +138,8 @@ import { createValkeyGlideDialCacheClient } from "dialcache/valkey-glide";
 
 const glideClient = await GlideClient.createClient({
   addresses: [{ host: "127.0.0.1", port: 6379 }],
+  requestTimeout: 2_000,
+  advancedConfiguration: { connectionTimeout: 2_000 },
 });
 const redisClient = createValkeyGlideDialCacheClient(glideClient);
 const dialcache = new DialCache({
@@ -152,6 +157,16 @@ function shutdown(): void {
 The application owns the complete Redis lifecycle. It creates and connects the underlying client and passes the semantic adapter to DialCache. During shutdown, stop starting DialCache-backed work and await every outstanding cached-function and `invalidateRemote()` promise, including calls still running fallbacks that may later write Redis. Then dispose adapter-owned resources and close the underlying connection. DialCache only borrows `redis.client`; it has no close or drain method and never disposes or closes caller resources.
 
 The node-redis adapter owns no additional resources, so the application closes the underlying node-redis client after draining work. The GLIDE adapter owns five native `Script` handles but not the wrapped connection. After outstanding operations finish, call its idempotent `dispose()` before closing GLIDE as shown above; disposal while an adapter operation is in flight throws rather than releasing a live script.
+
+### Async liveness contract
+
+DialCache fail-open behavior is rejection-driven: a Redis promise that never settles cannot fall through. Every `DialCacheRedisClient.read`, `write`, and `invalidate` promise must therefore resolve or reject within a finite application-defined budget covering connection establishment, reconnection, retries, offline queueing, dispatch, and response time. A connection timeout alone does not satisfy this contract. A pending read prevents fallback from starting, while a pending write withholds an already-computed fallback result and retains its process flight.
+
+Valkey GLIDE users should configure [`requestTimeout`](https://github.com/valkey-io/valkey-glide/blob/v2.4.2/node/src/BaseClient.ts#L770-L776) and [`advancedConfiguration.connectionTimeout`](https://github.com/valkey-io/valkey-glide/blob/v2.4.2/node/src/BaseClient.ts#L957-L964), as shown above. GLIDE applies the request timeout while sending, waiting for a response, reconnecting, and retrying. This bounds client waiting; it is not server-side cancellation, so a write dispatched before timeout may still execute.
+
+In node-redis 4.7, `socket.connectTimeout`, `disableOfflineQueue`, and `commandsQueueMaxLength` bound connection or queue behavior but do not impose a response deadline on a dispatched command. A [per-command `AbortSignal`](https://redis.io/docs/latest/develop/clients/nodejs/produsage/) can remove work that is still waiting to be sent, but once dispatched it no longer controls the pending reply. Node-redis 4.7 has no built-in strict dispatched-response deadline, and the bundled adapter does not inject queue cancellation. Applications requiring finite node-redis settlement must supply and document a custom `DialCacheRedisClient` policy for queue removal, hung connections, and ambiguous writes. Do not put Redis writes or invalidations behind a bare `Promise.race`: rejecting the outer promise neither removes queued work nor proves that an already-dispatched command did not execute.
+
+The same finite-settlement responsibility applies to async `cacheConfigProvider`, `rampSampler`, and custom `Serializer` methods. DialCache's fallback deadline below covers only the wrapped application function. Prefer resource-native budgets and cooperative cancellation for every injected async operation. Native budgets can bound client waiting and may prevent queued work; only a cooperating operation can guarantee that underlying work stops.
 
 `redis.createClient` and the `RedisClientFactory` type were removed. Move lazy factory work to application startup, retain the underlying client and adapter handles, and pass the resulting adapter as `redis.client`. Because `redis.client` was already supported and this change does not alter Redis keys or the wire protocol, migrated application construction works with both older and newer DialCache versions during rollout or rollback.
 
@@ -340,7 +355,7 @@ DialCache coalesces in-flight work at the lifetime of the first active cache lay
 
 With Redis configured, an instance-scoped leader that misses the process-local cache runs the Redis read and, on miss, the fallback/cache write; followers await that result. Process-local-only misses share the leader's fallback/cache write. This protects Redis and the source of truth from a thundering herd on hot keys.
 
-Coalescing only applies when at least one cache layer is active. Calls outside `enable()` are true pass-through, and calls where request-local, process-local, and Redis are all disabled are true pass-through.
+Coalescing only applies when at least one cache layer is active. Calls outside `enable()` are true pass-through. Calls where request-local, process-local, and Redis are all disabled are uncached and uncoalesced, but because they were initially enabled, the fallback deadline below still applies.
 
 Because coalescing is keyed by `cacheKey`, concurrent calls with the same key share the leader's execution. Any argument ignored by `cacheKey` must be safe to share this way; include inputs such as locale, auth context, or cancellation behavior in the key when they can change the returned value or whether the underlying function should run separately.
 
@@ -355,6 +370,60 @@ const getUser = dialcache.cached(
   },
 );
 ```
+
+### Fallback deadlines
+
+Once an initially enabled invocation starts its fallback, DialCache applies a 60-second monotonic deadline by default. Set `fallbackTimeoutMs` once on a cached wrapper to choose a positive integer deadline in milliseconds, up to 2,147,483,647, or set it to `null` to preserve an intentionally unbounded fallback:
+
+```ts
+import { FallbackTimeoutError } from "dialcache";
+
+const getUser = dialcache.cached(
+  (userId: string) => db.fetchUser(userId),
+  {
+    keyType: "user_id",
+    useCase: "GetUserWithDeadline",
+    cacheKey: (userId) => userId,
+    defaultConfig: DialCacheKeyConfig.enabled(60),
+    fallbackTimeoutMs: 2_000,
+  },
+);
+
+try {
+  await dialcache.enable(() => getUser("123"));
+} catch (error) {
+  if (error instanceof FallbackTimeoutError) {
+    logger.warn("source lookup exceeded its DialCache budget", {
+      useCase: error.useCase,
+      timeoutMs: error.timeoutMs,
+    });
+  }
+}
+```
+
+The timer starts only when the fallback begins. Same-key followers share the process or request-local leader's remaining budget and receive its `FallbackTimeoutError`; pass-through invocations where every layer is disabled have independent timers. Cache hits create no fallback timer. Calls that were initially outside an enabled context remain true pass-through and are not timed out, even when the wrapper configures `fallbackTimeoutMs`.
+
+Deadline delivery requires the JavaScript event loop to make progress. It cannot preempt a synchronous fallback prefix or other event-loop blocking, so rejection can arrive later than the configured duration; when control returns, DialCache checks the monotonic deadline before accepting the result. The deadline timer remains referenced until the fallback settles or times out. Consequently, an abandoned enabled fallback can keep an otherwise idle short-lived process alive until that deadline; shutdown code should drain outstanding DialCache work rather than discarding its promises.
+
+Timing out rejects the DialCache chain and clears its flight normally. A later fallback resolution is ignored, so that timed-out invocation cannot proceed to serializer, Redis, or local-cache publication. The underlying function is not canceled and may continue its own I/O or side effects; give the source operation its own native timeout or `AbortSignal` whenever possible. `fallbackTimeoutMs: null` disables this guard and makes finite fallback settlement entirely application-owned.
+
+This default is a behavioral compatibility change for enabled calls whose fallback previously remained pending beyond 60 seconds. Use the `null` escape hatch only after intentionally accepting that liveness risk. Timeout failures retain the bounded metrics classification `error="fallback"` with `in_fallback="true"`; the typed error provides the timeout details without adding high-cardinality labels.
+
+### Coalescing state
+
+`getCoalescingState()` returns a detached, point-in-time snapshot of process-scoped flights owned by that `DialCache` instance:
+
+```ts
+const state = dialcache.getCoalescingState();
+
+state.process.activeLeaders;
+state.process.activeFollowers;
+state.process.oldestLeaderAgeMs; // null when idle
+```
+
+A leader is one exact cache key currently tracked by the instance-scoped coalescer. A follower is each later invocation that joined that pending leader; the initiating invocation is not counted as a follower. Followers remain counted until their leader settles because abandoning a JavaScript promise is not observable. Request-local flights are deliberately excluded because their lifecycle is bounded by the outer `enable()` scope. `oldestLeaderAgeMs` uses a monotonic clock and is computed when the snapshot is requested.
+
+There is no library-wide flight cap or age-based replacement. A registry cap would bound only DialCache metadata while overflow or eviction could still create unbounded source work and unsafe duplicate publication. Finite operation deadlines provide eventual cleanup; application admission control and backpressure remain responsible for bounding simultaneous distinct-key work. Monitor leader count and oldest age to verify that those budgets hold in production.
 
 ## Enabled context
 
@@ -492,7 +561,7 @@ The Prometheus adapter emits:
 | `dialcache_invalidation_counter` | Counter | `cache_namespace`, `key_type`, `layer` | Invalidation calls for the layers touched today |
 | `dialcache_coalesced_counter` | Counter | `cache_namespace`, `use_case`, `key_type`, `scope` | Coalesced requests split by `request_local` or `process` scope |
 | `dialcache_get_timer` | Histogram | `cache_namespace`, `use_case`, `key_type`, `layer` | Cache get latency in seconds |
-| `dialcache_fallback_timer` | Histogram | `cache_namespace`, `use_case`, `key_type`, `layer` | Time spent in the underlying function |
+| `dialcache_fallback_timer` | Histogram | `cache_namespace`, `use_case`, `key_type`, `layer` | Elapsed time until the underlying function settles or timeout rejection is delivered |
 | `dialcache_serialization_timer` | Histogram | `cache_namespace`, `use_case`, `key_type`, `layer`, `operation` | Redis serializer dump/load latency |
 | `dialcache_size_histogram` | Histogram | `cache_namespace`, `use_case`, `key_type`, `layer` | Serialized Redis payload size in bytes |
 
@@ -553,7 +622,7 @@ The Datadog adapter emits exact increments of `1` for counters and preserves sec
 | `dialcache.invalidation.count` | Count | `cache_namespace`, `key_type`, `layer` | Invalidation calls for the layers touched |
 | `dialcache.coalesced.count` | Count | `cache_namespace`, `use_case`, `key_type`, `scope` | Coalesced requests by sharing scope |
 | `dialcache.get.duration` | Distribution or histogram | `cache_namespace`, `use_case`, `key_type`, `layer` | Cache get latency in seconds |
-| `dialcache.fallback.duration` | Distribution or histogram | `cache_namespace`, `use_case`, `key_type`, `layer` | Time spent in the underlying function in seconds |
+| `dialcache.fallback.duration` | Distribution or histogram | `cache_namespace`, `use_case`, `key_type`, `layer` | Elapsed time until the underlying function settles or timeout rejection is delivered |
 | `dialcache.serialization.duration` | Distribution or histogram | `cache_namespace`, `use_case`, `key_type`, `layer`, `operation` | Redis serializer dump/load latency in seconds |
 | `dialcache.serialization.size` | Distribution or histogram | `cache_namespace`, `use_case`, `key_type`, `layer` | Serialized Redis payload size in bytes |
 
@@ -572,7 +641,7 @@ The `error` label reports where an operation failed rather than copying the thro
 | `serialization_load` | Deserializing a Redis payload failed |
 | `serialization_dump` | Serializing a value for Redis failed |
 | `invalidation` | Writing an invalidation watermark failed |
-| `fallback` | The wrapped application function failed |
+| `fallback` | The wrapped application function failed or exceeded its DialCache deadline |
 | `unknown` | Reserved for an otherwise unclassified future failure site |
 
 These values are defined by the backend-neutral core and are identical for every metrics adapter. Raw thrown values, error names, messages, cache IDs, arguments, and Redis keys are never included in metric labels. Operational errors are still passed to the configured logger where the existing failure path logs them. `in_fallback` remains the explicit cache-plumbing-versus-application distinction for existing dashboards.
@@ -624,6 +693,8 @@ Included:
 - Dynamically extended watermark TTL with a configurable `DEFAULT_WATERMARK_TTL_SEC` floor
 - Future-buffer behavior that avoids cache writes during active invalidation windows
 - Request-scoped and instance-scoped coalescing for active cache work
+- A 60-second enabled-fallback deadline with per-wrapper override and explicit disable
+- Exact per-instance process-coalescing state inspection
 
 Not included yet:
 
@@ -631,7 +702,7 @@ Not included yet:
 - `cachedObject`
 - Expanded examples
 
-## Request-local benchmark
+## Cache-path benchmark
 
 From a repository checkout, run the semantic microbenchmark after installing dependencies:
 
@@ -639,7 +710,7 @@ From a repository checkout, run the semantic microbenchmark after installing dep
 pnpm benchmark:request-local
 ```
 
-The command builds `dist` before reporting request-local sequential-hit throughput plus request-local and instance-scoped coalescing fan-out. The benchmark is a maintainer tool and is not included in the published package. It asserts fallback counts and returned values but deliberately applies no timing threshold. Override its work sizes with `DIALCACHE_BENCH_ITERATIONS` and `DIALCACHE_BENCH_FANOUT`.
+The command builds `dist` before reporting five scenarios: sequential request-local hits, sequential process-local hits, enabled bounded fallbacks, request-local coalescing fan-out, and process coalescing fan-out. The benchmark is a maintainer tool and is not included in the published package. It asserts fallback counts, coalescing state, and returned values but deliberately applies no timing threshold. Override its work sizes with `DIALCACHE_BENCH_ITERATIONS` and `DIALCACHE_BENCH_FANOUT`.
 
 ## Releasing
 
