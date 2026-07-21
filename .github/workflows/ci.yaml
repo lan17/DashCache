@@ -15,6 +15,11 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # id-token lets the Codecov upload authenticate via OIDC instead of a
+    # long-lived token secret.
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v6
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
@@ -27,6 +32,15 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm test
+      # push events only reach this workflow for main, so this uploads
+      # coverage exactly when a commit lands there — never for PRs.
+      - uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        if: github.event_name == 'push'
+        with:
+          files: ./coverage/lcov.info
+          disable_search: true
+          use_oidc: true
+          fail_ci_if_error: true
       - run: pnpm build
       - run: pnpm test:integration
       - uses: actions/setup-node@v6
