@@ -48,12 +48,3 @@ jobs:
           node-version: "20"
           cache: "pnpm"
       - run: pnpm test:package
-
-  # Keep the previously required context alive until this rename lands and
-  # branch protection can be migrated without weakening checks on current main.
-  legacy-required-check:
-    name: gcache-ts
-    needs: test
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "DialCache CI passed"
