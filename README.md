@@ -682,6 +682,10 @@ The command builds `dist` before reporting five scenarios: sequential request-lo
 
 ### Releasing
 
-Publishing is driven manually from the `Release` workflow in GitHub Actions. Run it from `main`; the workflow rejects any other ref or a stale main commit. Semantic Release selects the next version from Conventional Commits since the highest stable `vX.Y.Z` tag. Breaking changes bump major, `feat` bumps minor, and every other allowed PR-title type (`fix`, `perf`, `docs`, `style`, `refactor`, `test`, `build`, `chore`, `ci`, and `revert`) bumps patch. The highest required bump wins.
+Publishing starts by manually running the `Release` workflow from current `main`. After the package checks pass, Semantic Release selects the next version from Conventional Commits since the highest stable `vX.Y.Z` tag. Breaking changes bump major, `feat` bumps minor, and every other normal PR-title type (`fix`, `perf`, `docs`, `style`, `refactor`, `test`, `build`, `chore`, `ci`, and `revert`) bumps patch. The highest required bump wins.
 
-After validating, building, and package-testing the release artifact, Semantic Release stamps the package version, creates the Git tag, publishes the public npm package with provenance, and publishes the GitHub release. The repository's `package.json` remains at its development seed version between releases.
+The workflow opens a `release: <version>` PR whose only change is the matching `package.json` version. `release` is a reserved Conventional Commit type configured not to request another release, so the version-control commit does not cause an extra bump. GitHub marks workflow runs for a PR opened with `GITHUB_TOKEN` as approval-required; approve those runs, review the PR, and squash-merge it normally through the protected branch.
+
+The merge triggers the publish job. Before any release side effect, it verifies current `main`, the release commit subject, the one-file diff, the package version, the absent tag, and Semantic Release's independently calculated version and commit. It then reruns the package checks and asks Semantic Release to create the matching Git tag, publish the public npm package with provenance, and publish the GitHub release.
+
+The repository must enable **Allow GitHub Actions to create and approve pull requests** under Actions workflow permissions. This workflow uses that capability only to create the version PR; it never approves or merges one, and no ruleset bypass actor or persistent release credential is required.

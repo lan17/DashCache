@@ -7,6 +7,9 @@ export default {
         preset: "conventionalcommits",
         presetConfig: {},
         releaseRules: [
+          // A version PR records the selected version without selecting a new
+          // release itself. Earlier commits still determine the release type.
+          { type: "release", release: false },
           { breaking: true, release: "major" },
           { type: "feat", release: "minor" },
           { type: "fix", release: "patch" },
@@ -26,10 +29,14 @@ export default {
       "@semantic-release/release-notes-generator",
       { preset: "conventionalcommits", presetConfig: {} },
     ],
-    "@semantic-release/npm",
-    [
-      "@semantic-release/github",
-      { successCommentCondition: false, failCommentCondition: false },
-    ],
+    ...(process.env.DIALCACHE_RELEASE_PLAN_ONLY === "true"
+      ? []
+      : [
+          "@semantic-release/npm",
+          [
+            "@semantic-release/github",
+            { successCommentCondition: false, failCommentCondition: false },
+          ],
+        ]),
   ],
 };

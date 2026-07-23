@@ -1,6 +1,11 @@
 name: Release
 
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - package.json
 
 permissions: {}
 
@@ -9,14 +14,15 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
+  prepare:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # contents: write pushes the release tag and GitHub release;
-    # id-token: write mints the OIDC token for npm trusted publishing.
+    # The preparation run can create a branch and PR, but it cannot publish to
+    # npm, tag a release, approve the PR, merge it, or bypass branch protection.
     permissions:
       contents: write
-      id-token: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -44,10 +50,248 @@ jobs:
           fi
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
+      - name: Resolve release
+        id: release
+        uses: cycjimmy/semantic-release-action@b12c8f6015dc215fe37bc154d4ad456dd3833c90 # v6.0.0
+        with:
+          semantic_version: 25.0.7
+          extra_plugins: conventional-changelog-conventionalcommits@9.3.1
+          dry_run: true
+        env:
+          # Planning excludes the npm and GitHub publishing plugins, so this
+          # job does not need an npm OIDC identity or release permissions.
+          DIALCACHE_RELEASE_PLAN_ONLY: "true"
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Record no-op release
+        if: steps.release.outputs.new_release_version == ''
+        run: echo "No releasable commits were found." >> "$GITHUB_STEP_SUMMARY"
+      - name: Open version pull request
+        if: steps.release.outputs.new_release_version != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.release.outputs.new_release_version }}
+        run: |
+          if [[ ! "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid release version: $RELEASE_VERSION" >&2
+            exit 1
+          fi
+
+          release_branch="release/v$RELEASE_VERSION"
+          release_title="release: $RELEASE_VERSION"
+          existing_pr="$(
+            gh pr list \
+              --repo "$GITHUB_REPOSITORY" \
+              --base main \
+              --head "$release_branch" \
+              --state open \
+              --json url \
+              --jq '.[0].url // empty'
+          )"
+          remote_ref="$(git ls-remote --heads origin "refs/heads/$release_branch")"
+
+          if [[ -n "$remote_ref" ]]; then
+            git fetch --force origin \
+              "refs/heads/$release_branch:refs/remotes/origin/$release_branch"
+            release_commit="$(git rev-parse "refs/remotes/origin/$release_branch")"
+            release_parent="$(git rev-parse "${release_commit}^")"
+            release_subject="$(git log -1 --format=%s "$release_commit")"
+            changed_files="$(
+              git diff-tree --no-commit-id --name-only -r \
+                "$release_parent" "$release_commit"
+            )"
+            actual_version="$(
+              git show "$release_commit:package.json" |
+                node -e 'const fs = require("node:fs"); console.log(JSON.parse(fs.readFileSync(0, "utf8")).version)'
+            )"
+
+            if [[ "$release_parent" != "$GITHUB_SHA" ]]; then
+              echo "Existing $release_branch is not based on current main $GITHUB_SHA" >&2
+              exit 1
+            fi
+            if [[ "$release_subject" != "$release_title" ]]; then
+              echo "Expected $release_branch subject '$release_title'; got '$release_subject'" >&2
+              exit 1
+            fi
+            if [[ "$changed_files" != "package.json" ]]; then
+              echo "Expected $release_branch to change only package.json; got:" >&2
+              echo "$changed_files" >&2
+              exit 1
+            fi
+            if [[ "$actual_version" != "$RELEASE_VERSION" ]]; then
+              echo "Expected $release_branch package version $RELEASE_VERSION; got $actual_version" >&2
+              exit 1
+            fi
+          else
+            if [[ -n "$existing_pr" ]]; then
+              echo "Open release PR $existing_pr has no remote head branch" >&2
+              exit 1
+            fi
+
+            npm version "$RELEASE_VERSION" --no-git-tag-version --allow-same-version
+
+            actual_version="$(node -p 'require("./package.json").version')"
+            if [[ "$actual_version" != "$RELEASE_VERSION" ]]; then
+              echo "Expected package.json version $RELEASE_VERSION; got $actual_version" >&2
+              exit 1
+            fi
+
+            git diff --exit-code -- . ':(exclude)package.json'
+            if git diff --quiet -- package.json; then
+              echo "package.json already has release version $RELEASE_VERSION" >&2
+              exit 1
+            fi
+
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -- package.json
+            git commit -m "$release_title"
+
+            git -c credential.helper= \
+              -c "credential.helper=!f() { echo username=x-access-token; echo \"password=\$GH_TOKEN\"; }; f" \
+              push "https://github.com/$GITHUB_REPOSITORY.git" \
+              "HEAD:refs/heads/$release_branch"
+          fi
+
+          if [[ -n "$existing_pr" ]]; then
+            existing_title="$(gh pr view "$existing_pr" --json title --jq .title)"
+            if [[ "$existing_title" != "$release_title" ]]; then
+              echo "Expected PR title '$release_title'; got '$existing_title'" >&2
+              exit 1
+            fi
+            echo "Release PR already open: $existing_pr" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          pr_body="Automated by the Release workflow run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID.
+
+          This PR updates only package.json to $RELEASE_VERSION. Approve its workflow runs, review it, and squash-merge it to publish the release from the protected main branch."
+          pr_url="$(
+            gh pr create \
+              --repo "$GITHUB_REPOSITORY" \
+              --base main \
+              --head "$release_branch" \
+              --title "$release_title" \
+              --body "$pr_body"
+          )"
+          echo "Opened release PR: $pr_url" >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    if: "${{ github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release: ') }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # contents: write pushes the release tag and GitHub release;
+    # id-token: write mints the OIDC token for npm trusted publishing.
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          version: 10.33.0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - name: Verify publish source
+        id: source
+        run: |
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "Release publish must run from main; got $GITHUB_REF" >&2
+            exit 1
+          fi
+
+          git fetch --force origin main:refs/remotes/origin/main --tags
+          remote_main="$(git rev-parse origin/main)"
+          if [[ "$GITHUB_SHA" != "$remote_main" ]]; then
+            echo "Release source $GITHUB_SHA is not current main $remote_main" >&2
+            exit 1
+          fi
+
+          release_subject="$(git log -1 --format=%s "$GITHUB_SHA")"
+          if [[ ! "$release_subject" =~ ^release:\ ([0-9]+\.[0-9]+\.[0-9]+)(\ \(#[0-9]+\))?$ ]]; then
+            echo "Invalid release commit subject: $release_subject" >&2
+            exit 1
+          fi
+          release_version="${BASH_REMATCH[1]}"
+
+          parent_count="$(git rev-list --parents -n 1 "$GITHUB_SHA" | awk '{print NF - 1}')"
+          if [[ "$parent_count" != "1" ]]; then
+            echo "Release commit must have exactly one parent; got $parent_count" >&2
+            exit 1
+          fi
+          release_parent="$(git rev-parse "${GITHUB_SHA}^")"
+          changed_files="$(
+            git diff-tree --no-commit-id --name-only -r \
+              "$release_parent" "$GITHUB_SHA"
+          )"
+          if [[ "$changed_files" != "package.json" ]]; then
+            echo "Release commit must change only package.json; got:" >&2
+            echo "$changed_files" >&2
+            exit 1
+          fi
+
+          actual_version="$(node -p 'require("./package.json").version')"
+          if [[ "$actual_version" != "$release_version" ]]; then
+            echo "Expected package.json version $release_version; got $actual_version" >&2
+            exit 1
+          fi
+          if git rev-parse --verify --quiet "refs/tags/v$release_version" >/dev/null; then
+            echo "Release tag v$release_version already exists" >&2
+            exit 1
+          fi
+
+          echo "release_commit=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          echo "release_version=$release_version" >> "$GITHUB_OUTPUT"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
+      - name: Resolve publish release
+        id: plan
+        uses: cycjimmy/semantic-release-action@b12c8f6015dc215fe37bc154d4ad456dd3833c90 # v6.0.0
+        with:
+          semantic_version: 25.0.7
+          extra_plugins: conventional-changelog-conventionalcommits@9.3.1
+          dry_run: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Verify publish plan
+        env:
+          PLANNED_RELEASE_COMMIT: ${{ steps.plan.outputs.new_release_git_head }}
+          PLANNED_RELEASE_VERSION: ${{ steps.plan.outputs.new_release_version }}
+          EXPECTED_RELEASE_COMMIT: ${{ steps.source.outputs.release_commit }}
+          EXPECTED_RELEASE_VERSION: ${{ steps.source.outputs.release_version }}
+        run: |
+          if [[ "$PLANNED_RELEASE_COMMIT" != "$EXPECTED_RELEASE_COMMIT" ]]; then
+            echo "Expected planned release commit $EXPECTED_RELEASE_COMMIT; got $PLANNED_RELEASE_COMMIT" >&2
+            exit 1
+          fi
+          if [[ "$PLANNED_RELEASE_VERSION" != "$EXPECTED_RELEASE_VERSION" ]]; then
+            echo "Expected planned release version $EXPECTED_RELEASE_VERSION; got $PLANNED_RELEASE_VERSION" >&2
+            exit 1
+          fi
       - name: Semantic Release
+        id: release
         uses: cycjimmy/semantic-release-action@b12c8f6015dc215fe37bc154d4ad456dd3833c90 # v6.0.0
         with:
           semantic_version: 25.0.7
           extra_plugins: conventional-changelog-conventionalcommits@9.3.1
         env:
           GITHUB_TOKEN: ${{ github.token }}
+      - name: Verify published release
+        env:
+          ACTUAL_RELEASE_COMMIT: ${{ steps.release.outputs.new_release_git_head }}
+          ACTUAL_RELEASE_VERSION: ${{ steps.release.outputs.new_release_version }}
+          EXPECTED_RELEASE_COMMIT: ${{ steps.source.outputs.release_commit }}
+          EXPECTED_RELEASE_VERSION: ${{ steps.source.outputs.release_version }}
+        run: |
+          if [[ "$ACTUAL_RELEASE_COMMIT" != "$EXPECTED_RELEASE_COMMIT" ]]; then
+            echo "Expected release commit $EXPECTED_RELEASE_COMMIT; got $ACTUAL_RELEASE_COMMIT" >&2
+            exit 1
+          fi
+          if [[ "$ACTUAL_RELEASE_VERSION" != "$EXPECTED_RELEASE_VERSION" ]]; then
+            echo "Expected release version $EXPECTED_RELEASE_VERSION; got $ACTUAL_RELEASE_VERSION" >&2
+            exit 1
+          fi

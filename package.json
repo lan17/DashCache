@@ -1,6 +1,6 @@
 {
   "name": "dialcache",
-  "version": "0.1.0",
+  "version": "0.7.0",
   "description": "Fine-grained TypeScript caching with explicit local and Redis controls.",
   "license": "MIT",
   "sideEffects": false,
