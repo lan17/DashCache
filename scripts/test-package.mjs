@@ -28,6 +28,7 @@ const rootConsumer = `import {
   type DialCacheMetricsAdapter,
   type DialCacheRedisClient,
   type DisabledReason,
+  type GetOrLoadOptions,
   type InvalidationMetricLabels,
   type MetricErrorKind,
   type ProcessCoalescingState,
@@ -50,6 +51,11 @@ const optionsFor = (useCase: string) => ({
   keyType: "id",
   useCase,
   cacheKey: (id: string) => id,
+});
+const inlineOptionsFor = (useCase: string, key = "1") => ({
+  keyType: "id",
+  useCase,
+  key,
 });
 const metrics: DialCacheMetricsAdapter = {
   request: () => undefined,
@@ -95,6 +101,14 @@ const loadWithoutFallbackDeadline = cache.cached(async (id: string) => id, {
   cacheKey: (id) => id,
   fallbackTimeoutMs: null,
 });
+const inlineSync: Promise<{ readonly id: string }> = cache.getOrLoad(
+  () => ({ id: "sync" as const }),
+  inlineOptionsFor("InlineSync"),
+);
+const inlineAsync: Promise<{ readonly id: string }> = cache.getOrLoad(
+  async () => ({ id: "async" as const }),
+  inlineOptionsFor("InlineAsync"),
+);
 
 interface JsonCompatibleRecord {
   readonly id: string;
@@ -127,6 +141,11 @@ const dateOptions: CachedOptions<DateLoader> = {
   ...optionsFor("TypedDateOptions"),
   serializer: dateSerializer,
 };
+const inlineDateOptions: GetOrLoadOptions<Date> = {
+  ...inlineOptionsFor("InlineDateWithSerializer"),
+  serializer: dateSerializer,
+};
+const inlineDate: Promise<Date> = cache.getOrLoad(async () => new Date(0), inlineDateOptions);
 
 class MethodBearingValue {
   constructor(readonly id: string) {}
@@ -161,6 +180,10 @@ cache.cached(async (_id: string) => new Uint8Array([1, 2]), optionsFor("TypedArr
 cache.cached(async (id: string) => new MethodBearingValue(id), optionsFor("ClassWithoutSerializer"));
 // @ts-expect-error CachedOptions itself requires a serializer for Date values.
 const missingDateSerializer: CachedOptions<DateLoader> = optionsFor("TypedDateOptionsWithoutSerializer");
+// @ts-expect-error getOrLoad requires an explicit serializer for an inferred Date value.
+cache.getOrLoad(async () => new Date(0), inlineOptionsFor("InlineDateWithoutSerializer"));
+// @ts-expect-error GetOrLoadOptions itself requires a serializer for Date values.
+const missingInlineDateSerializer: GetOrLoadOptions<Date> = inlineOptionsFor("TypedInlineDateWithoutSerializer");
 
 const requestLocalConfig = new DialCacheKeyConfig({ requestLocal: true });
 const structuralConfigProvider: CacheConfigProvider = () => ({
@@ -252,6 +275,8 @@ const rootHasNoDatadogFactory: "createDatadogDialCacheMetrics" extends keyof Dia
 
 void load;
 void loadWithoutFallbackDeadline;
+void inlineSync;
+void inlineAsync;
 void loadJsonRecord;
 void loadEmptyObject;
 void loadUndefined;
@@ -259,7 +284,10 @@ void loadVoid;
 void loadDate;
 void loadDateWithTrustedJsonAssertion;
 void dateOptions;
+void inlineDateOptions;
+void inlineDate;
 void missingDateSerializer;
+void missingInlineDateSerializer;
 void requestLocalConfig;
 void structuralConfigProvider;
 void requestLocalCoalescingLabels;
@@ -292,6 +320,8 @@ const cacheWithGlobalSerializer = new DialCache({
 });
 // @ts-expect-error A global serializer cannot establish per-function Date compatibility.
 cacheWithGlobalSerializer.cached(async (_id: string) => new Date(0), optionsFor("GlobalSerializerNeedsTypedOverride"));
+// @ts-expect-error A global serializer cannot establish per-invocation Date compatibility.
+cacheWithGlobalSerializer.getOrLoad(async () => new Date(0), inlineOptionsFor("GlobalSerializerNeedsInlineTypedOverride"));
 void cacheHasNoFlushAll;
 void cacheHasNoClose;
 void clientHasNoFlushAll;
@@ -487,6 +517,22 @@ const first = await overlayCache.enable(() => load("123"));
 const second = await overlayCache.enable(() => load("123"));
 if (calls !== 1 || second !== first) {
   throw new Error("The packed ESM runtime did not inherit the default local TTL through a sparse overlay");
+}
+let inlineCalls = 0;
+const inlineOptions = {
+  keyType: "id",
+  useCase: "PackedRuntimeGetOrLoad",
+  key: "123",
+  defaultConfig: root.DialCacheKeyConfig.enabled(60),
+};
+const inlineFirst = await overlayCache.enable(() =>
+  overlayCache.getOrLoad(() => ({ source: "inline", calls: ++inlineCalls }), inlineOptions),
+);
+const inlineSecond = await overlayCache.enable(() =>
+  overlayCache.getOrLoad(() => ({ source: "unexpected", calls: ++inlineCalls }), inlineOptions),
+);
+if (inlineCalls !== 1 || inlineSecond !== inlineFirst) {
+  throw new Error("The packed ESM runtime did not execute getOrLoad through the cache chain");
 }`,
     ],
     { cwd: workspace },
@@ -566,6 +612,22 @@ void (async () => {
   const second = await overlayCache.enable(() => load("123"));
   if (calls !== 1 || second !== first) {
     throw new Error("The packed CommonJS runtime did not inherit the default local TTL through a sparse overlay");
+  }
+  let inlineCalls = 0;
+  const inlineOptions = {
+    keyType: "id",
+    useCase: "PackedRuntimeGetOrLoad",
+    key: "123",
+    defaultConfig: root.DialCacheKeyConfig.enabled(60),
+  };
+  const inlineFirst = await overlayCache.enable(() =>
+    overlayCache.getOrLoad(() => ({ source: "inline", calls: ++inlineCalls }), inlineOptions),
+  );
+  const inlineSecond = await overlayCache.enable(() =>
+    overlayCache.getOrLoad(() => ({ source: "unexpected", calls: ++inlineCalls }), inlineOptions),
+  );
+  if (inlineCalls !== 1 || inlineSecond !== inlineFirst) {
+    throw new Error("The packed CommonJS runtime did not execute getOrLoad through the cache chain");
   }
 })().catch((error) => {
   console.error(error);

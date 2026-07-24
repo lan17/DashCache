@@ -100,7 +100,7 @@ type IsJsonObject<T extends object, Depth extends readonly unknown[]> = [keyof T
         : false;
     }[keyof T]>;
 
-interface CachedOptionsBase<Fn extends AnyFn> {
+interface CacheOperationOptionsBase {
   readonly keyType: string;
   readonly useCase: string;
   readonly defaultConfig?: DialCacheKeyConfig | null;
@@ -117,6 +117,9 @@ interface CachedOptionsBase<Fn extends AnyFn> {
    * published by DialCache, but does not cancel the underlying operation.
    */
   readonly fallbackTimeoutMs?: number | null;
+}
+
+interface CachedOptionsBase<Fn extends AnyFn> extends CacheOperationOptionsBase {
   /**
    * Select every input dimension that can affect the returned value. Concurrent
    * enabled calls with the same cache key may share one in-flight execution.
@@ -127,6 +130,9 @@ interface CachedOptionsBase<Fn extends AnyFn> {
 type SerializerOption<Value> = IsJsonCompatible<Value> extends true
   ? { readonly serializer?: Serializer<Value> | null }
   : { readonly serializer: Serializer<Value> };
+type CacheOperationOptions<Value> = CacheOperationOptionsBase & {
+  readonly serializer?: Serializer<Value> | null;
+};
 
 /**
  * Options for a cached function. A serializer is required when the function's
@@ -135,6 +141,22 @@ type SerializerOption<Value> = IsJsonCompatible<Value> extends true
  * runtime round-trip validation.
  */
 export type CachedOptions<Fn extends AnyFn> = CachedOptionsBase<Fn> & SerializerOption<CachedValue<Fn>>;
+
+interface GetOrLoadOptionsBase extends CacheOperationOptionsBase {
+  /**
+   * Include every captured value that can affect the loaded result. Concurrent
+   * enabled calls with the same cache key may share one in-flight loader.
+   */
+  readonly key: CacheKeySpec;
+}
+
+/**
+ * Options for one inline cache operation. A serializer is required when the
+ * loaded value is not statically compatible with the default JSON serializer.
+ * Supplying one is a trusted assertion; DialCache does not perform runtime
+ * round-trip validation.
+ */
+export type GetOrLoadOptions<Value> = GetOrLoadOptionsBase & SerializerOption<Value>;
 
 /**
  * A cached function returns references owned by the cache. Treat returned
@@ -251,67 +273,94 @@ export class DialCache {
     const fallbackTimeoutMs = resolveFallbackTimeoutMs(options.fallbackTimeoutMs);
     this.registerUseCase(options.useCase);
 
-    const run = async (...args: Parameters<Fn>): Promise<CachedValue<Fn>> => {
-      // `fn`'s awaited result is the cached value by construction; the generic `Fn` erases it to `unknown`.
-      const rawFallback = async (): Promise<CachedValue<Fn>> => (await fn(...args)) as CachedValue<Fn>;
-      const noLayerLabels = {
-        cacheNamespace: this.namespace,
-        useCase: options.useCase,
-        keyType: options.keyType,
-        layer: NO_CACHE_LAYER,
-      } as const;
+    return (...args: Parameters<Fn>): Promise<CachedValue<Fn>> =>
+      this.executeCacheOperation(
+        // `Fn` preserves the public parameter and return types, but its
+        // `AnyFn` constraint erases the invocation result to `unknown`.
+        () => fn(...args) as Awaitable<CachedValue<Fn>>,
+        () => options.cacheKey(...args),
+        options,
+        defaultConfig,
+        fallbackTimeoutMs,
+      );
+  }
 
-      if (!this.isEnabled()) {
-        this.metrics?.disabled({ ...noLayerLabels, reason: "context" });
-        return await rawFallback();
+  /**
+   * Executes one inline loader through the configured cache chain. Unlike
+   * `cached()`, this method does not register the use case, so a stable use case
+   * can be declared repeatedly at the call site. Returned in-memory values are
+   * shared by reference and must be treated as immutable.
+   */
+  getOrLoad<Value>(load: () => Awaitable<Value>, options: GetOrLoadOptions<Value>): Promise<Value> {
+    const defaultConfig = snapshotDefaultConfig(options.defaultConfig);
+    const fallbackTimeoutMs = resolveFallbackTimeoutMs(options.fallbackTimeoutMs);
+    this.assertUseCaseIsNotReserved(options.useCase);
+
+    return this.executeCacheOperation(load, () => options.key, options, defaultConfig, fallbackTimeoutMs);
+  }
+
+  private async executeCacheOperation<Value>(
+    load: () => Awaitable<Value>,
+    selectKey: () => CacheKeySpec,
+    options: CacheOperationOptions<Value>,
+    defaultConfig: DialCacheKeyConfig | null,
+    fallbackTimeoutMs: number | null,
+  ): Promise<Value> {
+    const rawFallback = async (): Promise<Value> => await load();
+    const noLayerLabels = {
+      cacheNamespace: this.namespace,
+      useCase: options.useCase,
+      keyType: options.keyType,
+      layer: NO_CACHE_LAYER,
+    } as const;
+
+    if (!this.isEnabled()) {
+      this.metrics?.disabled({ ...noLayerLabels, reason: "context" });
+      return await rawFallback();
+    }
+
+    const fallback = (): Promise<Value> => withFallbackTimeout(rawFallback, options.useCase, fallbackTimeoutMs);
+
+    let key: DialCacheKey;
+    try {
+      key = this.buildKey(options, selectKey(), defaultConfig);
+    } catch (error) {
+      this.logger.error("Could not construct DialCache key", error);
+      this.metrics?.error({
+        ...noLayerLabels,
+        error: "key_construction",
+        inFallback: false,
+      });
+      return await this.callFallback(noLayerLabels, fallback);
+    }
+
+    let keyConfig: DialCacheKeyConfig | null;
+    try {
+      keyConfig = await fetchKeyConfig(this.configProvider, key);
+    } catch (error) {
+      // Provider failure: fail open and run uncached, mirroring the per-layer config_error path.
+      this.logger.warn("Could not resolve DialCache key config", error);
+      this.recordError(key, NO_CACHE_LAYER, "config_resolution");
+      this.metrics?.disabled({ ...noLayerLabels, reason: "config_error" });
+      return await this.callFallback(noLayerLabels, fallback);
+    }
+
+    // An unawaited child can inherit the async store after its outer enable()
+    // callback settles. The closed holder turns that detached work back into
+    // pass-through instead of allowing it to repopulate request state.
+    if (!this.isEnabled()) {
+      this.metrics?.disabled({ ...noLayerLabels, reason: "context" });
+      return await this.callFallback(noLayerLabels, fallback);
+    }
+
+    if (keyConfig?.requestLocal === true) {
+      const requestLocalCache = getOrCreateRequestLocalCache(this.context);
+      if (requestLocalCache !== null) {
+        return await this.getThroughRequestLocal(requestLocalCache, key, keyConfig, fallback);
       }
+    }
 
-      const fallback = (): Promise<CachedValue<Fn>> =>
-        withFallbackTimeout(rawFallback, options.useCase, fallbackTimeoutMs);
-
-      let key: DialCacheKey;
-      try {
-        key = this.buildKey(options, options.cacheKey(...args), defaultConfig);
-      } catch (error) {
-        this.logger.error("Could not construct DialCache key", error);
-        this.metrics?.error({
-          ...noLayerLabels,
-          error: "key_construction",
-          inFallback: false,
-        });
-        return await this.callFallback(noLayerLabels, fallback);
-      }
-
-      let keyConfig: DialCacheKeyConfig | null;
-      try {
-        keyConfig = await fetchKeyConfig(this.configProvider, key);
-      } catch (error) {
-        // Provider failure: fail open and run uncached, mirroring the per-layer config_error path.
-        this.logger.warn("Could not resolve DialCache key config", error);
-        this.recordError(key, NO_CACHE_LAYER, "config_resolution");
-        this.metrics?.disabled({ ...noLayerLabels, reason: "config_error" });
-        return await this.callFallback(noLayerLabels, fallback);
-      }
-
-      // An unawaited child can inherit the async store after its outer enable()
-      // callback settles. The closed holder turns that detached work back into
-      // pass-through instead of allowing it to repopulate request state.
-      if (!this.isEnabled()) {
-        this.metrics?.disabled({ ...noLayerLabels, reason: "context" });
-        return await this.callFallback(noLayerLabels, fallback);
-      }
-
-      if (keyConfig?.requestLocal === true) {
-        const requestLocalCache = getOrCreateRequestLocalCache(this.context);
-        if (requestLocalCache !== null) {
-          return await this.getThroughRequestLocal(requestLocalCache, key, keyConfig, fallback);
-        }
-      }
-
-      return await this.getThroughSharedLayers(key, keyConfig, fallback, CacheLayer.LOCAL);
-    };
-
-    return run;
+    return await this.getThroughSharedLayers(key, keyConfig, fallback, CacheLayer.LOCAL);
   }
 
   /**
@@ -594,7 +643,7 @@ export class DialCache {
 
   /**
    * Invalid runtime TTL/ramp leaves can only come from provider results, since
-   * static defaults are validated at registration. Count them as
+   * static defaults are validated before the operation executes. Count them as
    * config_resolution errors as well as disabled skips so garbage config is
    * alertable separately from intentional ramp-downs and disabled policy.
    */
@@ -605,17 +654,21 @@ export class DialCache {
   }
 
   private registerUseCase(useCase: string): void {
-    if (useCase === "watermark") {
-      throw new UseCaseNameIsReservedError(useCase);
-    }
+    this.assertUseCaseIsNotReserved(useCase);
     if (this.useCases.has(useCase)) {
       throw new UseCaseIsAlreadyRegisteredError(useCase);
     }
     this.useCases.add(useCase);
   }
 
-  private buildKey<Fn extends AnyFn>(
-    options: CachedOptions<Fn>,
+  private assertUseCaseIsNotReserved(useCase: string): void {
+    if (useCase === "watermark") {
+      throw new UseCaseNameIsReservedError(useCase);
+    }
+  }
+
+  private buildKey<Value>(
+    options: CacheOperationOptions<Value>,
     cacheKey: CacheKeySpec,
     defaultConfig: DialCacheKeyConfig | null,
   ): DialCacheKey {

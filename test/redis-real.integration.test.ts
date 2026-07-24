@@ -189,7 +189,7 @@ describe.each(engines)("DialCache Lua protocol on $name", ({ image }) => {
       client = harnesses[kind];
     });
 
-    it("round-trips untracked UTF-8 and binary values", async () => {
+    it("round-trips untracked UTF-8, binary, and inline-loader values", async () => {
       if (client === undefined || admin === undefined) {
         throw new Error("Redis test clients did not start");
       }
@@ -214,18 +214,34 @@ describe.each(engines)("DialCache Lua protocol on $name", ({ image }) => {
         defaultConfig: remoteOnly,
         serializer: binarySerializer,
       });
+      let inlineCalls = 0;
+      const inlineOptions = {
+        keyType: "item_id",
+        useCase: "RealInline",
+        key: "inline",
+        defaultConfig: remoteOnly,
+      } as const;
 
       const firstJson = await dialcache.enable(async () => await getJson("json"));
       const secondJson = await dialcache.enable(async () => await getJson("json"));
       const firstBinary = await dialcache.enable(async () => await getBinary("buffer"));
       const secondBinary = await dialcache.enable(async () => await getBinary("buffer"));
+      const firstInline = await dialcache.enable(async () =>
+        await dialcache.getOrLoad(async () => ({ source: "inline", calls: ++inlineCalls }), inlineOptions),
+      );
+      const secondInline = await dialcache.enable(async () =>
+        await dialcache.getOrLoad(async () => ({ source: "unexpected", calls: ++inlineCalls }), inlineOptions),
+      );
 
       expect(firstJson).toEqual({ id: "json", calls: 1 });
       expect(secondJson).toEqual(firstJson);
       expect(firstBinary).toBe("binary:buffer:1");
       expect(secondBinary).toBe(firstBinary);
+      expect(firstInline).toEqual({ source: "inline", calls: 1 });
+      expect(secondInline).toEqual(firstInline);
       expect(jsonCalls).toBe(1);
       expect(binaryCalls).toBe(1);
+      expect(inlineCalls).toBe(1);
     });
 
     it("stores arbitrary binary payloads without base64 expansion", async () => {

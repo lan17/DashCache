@@ -27,6 +27,7 @@ export type {
   CachedOptions,
   CachedValue,
   CoalescingState,
+  GetOrLoadOptions,
   ProcessCoalescingState,
 } from "./dialcache.js";
 export { DialCacheKey, invalidationPrefix, normalizeArgs, redisClusterHashTag } from "./key.js";
