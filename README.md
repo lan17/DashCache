@@ -129,6 +129,9 @@ Use `cached(fn, options)` for an extracted, reusable function. The wrapped calla
 `getOrLoad(load, options)` runs one zero-argument loader through the same policy, cache layers, coalescing, invalidation, metrics, serialization, deadlines, and fail-open behavior as `cached()`. It is useful when only part of a larger function should be cached and the loader needs to capture local values:
 
 ```ts
+// Reuse the caller-owned defaults; getOrLoad() snapshots them per invocation.
+const profileCacheDefaults = DialCacheKeyConfig.enabled(60);
+
 const profile = await dialcache.getOrLoad(
   async () => {
     const user = await db.getUser(userId);
@@ -138,7 +141,7 @@ const profile = await dialcache.getOrLoad(
     keyType: "user_id",
     useCase: "BuildProfile",
     key: { id: userId, args: { locale } },
-    defaultConfig: DialCacheKeyConfig.enabled(60),
+    defaultConfig: profileCacheDefaults,
   },
 );
 ```
@@ -365,7 +368,7 @@ Pass the same module namespace that created the client. DialCache uses its
 itself, so linked workspaces and applications with another installed GLIDE
 version cannot accidentally mix native script handles.
 
-The application owns the complete Redis lifecycle. It creates and connects the underlying client and passes the semantic adapter to DialCache. During shutdown, stop starting DialCache-backed work and await every outstanding cached-function and `invalidateRemote()` promise, including calls still running fallbacks that may later write Redis. Then dispose adapter-owned resources and close the underlying connection. DialCache only borrows `redis.client`; it has no close or drain method and never disposes or closes caller resources.
+The application owns the complete Redis lifecycle. It creates and connects the underlying client and passes the semantic adapter to DialCache. During shutdown, stop starting DialCache-backed work and await every promise returned by a cached function, `getOrLoad()`, or `invalidateRemote()`, including calls still running fallbacks that may later write Redis. Then dispose adapter-owned resources and close the underlying connection. DialCache only borrows `redis.client`; it has no close or drain method and never disposes or closes caller resources.
 
 The node-redis adapter owns no additional resources, so the application closes the underlying node-redis client after draining work. The GLIDE adapter owns five native `Script` handles but not the wrapped connection. After outstanding operations finish, call its idempotent `dispose()` before closing GLIDE as shown above; disposal while an adapter operation is in flight throws rather than releasing a live script.
 
@@ -430,7 +433,7 @@ This guard is deliberately conservative and is not a proof of runtime data. Type
 
 ## Cached-value ownership
 
-Treat values returned by cached functions as immutable. DialCache does not clone or freeze values stored in request-local or process-local memory. Mutating a cached object can therefore be observed by later callers in the same request, callers in other requests that hit the process-local cache, or callers that coalesced onto the same in-flight result.
+Treat values returned by cached functions or `getOrLoad()` as immutable. DialCache does not clone or freeze values stored in request-local or process-local memory. Mutating a cached object can therefore be observed by later callers in the same request, callers in other requests that hit the process-local cache, or callers that coalesced onto the same in-flight result.
 
 This contract includes nested objects and arrays, `Map`, `Set`, `Buffer`, typed arrays, and class instances. Redis deserialization can produce a different reference from an in-memory hit, so reference identity is layer-dependent and is not part of the API contract; never rely on a specific layer cloning a value before mutation.
 
